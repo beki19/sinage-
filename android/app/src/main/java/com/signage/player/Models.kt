@@ -66,6 +66,9 @@ data class ScheduleRule(val days: Set<Int>, val start: Int, val end: Int, val pr
     }
 }
 
+/** A remote command from the CMS: refresh, restart, reboot or screenshot. */
+data class Command(val id: String, val type: String)
+
 data class Manifest(
     val deviceName: String,
     val version: String,
@@ -73,6 +76,7 @@ data class Manifest(
     val programs: Map<String, Program>,
     val defaultProgram: String?,
     val schedule: List<ScheduleRule>,
+    val commands: List<Command>,
     val pollSeconds: Int,
 ) {
     /** The first matching time slot wins; otherwise the default. */
@@ -111,6 +115,9 @@ data class Manifest(
                 programs = programs.associateBy { it.id },
                 defaultProgram = defaultProgram,
                 schedule = parseSchedule(o),
+                commands = o.optJSONArray("commands")?.let { arr ->
+                    (0 until arr.length()).map { arr.getJSONObject(it) }.map { Command(it.getString("id"), it.getString("type")) }
+                }.orEmpty(),
                 pollSeconds = o.optInt("pollSeconds", 30).coerceIn(5, 3600),
             )
         }

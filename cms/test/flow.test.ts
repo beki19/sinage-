@@ -12,16 +12,19 @@ let server: Server;
 let base = "";
 let dataDir = "";
 let admin = "";
+let flush = () => {};
 
 before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "signage-test-"));
-  const { app } = createApp({ dataDir, adminPassword: "secret" });
+  const { app, store } = createApp({ dataDir, adminPassword: "secret" });
+  flush = () => store.save(); // writes any pending save now, so no timer fires after the folder is gone
   server = app.listen(0);
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
 after(() => {
+  flush();
   server.close();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
@@ -254,4 +257,38 @@ test("groups: screens in a group show the group's content; deleting the group ha
   const after = (await api("GET", "/api/player/manifest", undefined, one.auth)).json;
   assert.equal(after.defaultProgram, `playlist:${own.id}`);
   assert.equal(after.schedule.length, 0);
+});
+
+test("remote commands and screenshots", async () => {
+  const group = (await api("POST", "/api/groups", { name: "Cmd group" }, admin)).json;
+  const screen = await pairScreen("Remote TV", { groupId: group.id });
+
+  assert.equal((await api("POST", `/api/devices/${screen.id}/commands`, { type: "format-disk" }, admin)).status, 400);
+  assert.equal((await api("POST", `/api/devices/${screen.id}/commands`, { type: "screenshot" }, admin)).status, 202);
+  assert.equal((await api("POST", `/api/devices/${screen.id}/commands`, { type: "screenshot" }, admin)).status, 202);
+  assert.equal((await api("POST", `/api/groups/${group.id}/commands`, { type: "reboot" }, admin)).json.screens, 1);
+
+  let man = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json;
+  assert.deepEqual(man.commands.map((c: { type: string }) => c.type), ["screenshot", "reboot"], "duplicates are merged");
+  const version = man.version;
+
+  // Screenshot upload clears the screenshot command; only that device may upload.
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
+  assert.equal((await fetch(base + "/api/player/screenshot", { method: "POST", headers: { "content-type": "image/jpeg" }, body: jpeg })).status, 401);
+  const up = await fetch(base + "/api/player/screenshot", { method: "POST", headers: { authorization: screen.auth, "content-type": "image/jpeg" }, body: jpeg });
+  assert.equal(up.status, 204);
+  const shot = await fetch(base + `/api/devices/${screen.id}/screenshot`, { headers: { authorization: admin } });
+  assert.equal(shot.status, 200);
+  assert.deepEqual(Buffer.from(await shot.arrayBuffer()), jpeg);
+
+  // The screen reports the reboot twice: about to, then couldn't.
+  const reboot = man.commands.find((c: { type: string }) => c.type === "reboot");
+  await api("POST", `/api/player/commands/${reboot.id}/done`, { ok: true, message: "Rebooting" }, screen.auth);
+  await api("POST", `/api/player/commands/${reboot.id}/done`, { ok: false, message: "Needs root" }, screen.auth);
+  man = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json;
+  assert.equal(man.commands.length, 0);
+  assert.equal(man.version, version, "commands don't change the content version");
+  const dev = (await api("GET", "/api/devices", undefined, admin)).json.find((d: { id: string }) => d.id === screen.id);
+  assert.deepEqual([dev.lastCommandResult.type, dev.lastCommandResult.ok, dev.lastCommandResult.message], ["reboot", false, "Needs root"]);
+  assert.ok(dev.screenshotAt);
 });

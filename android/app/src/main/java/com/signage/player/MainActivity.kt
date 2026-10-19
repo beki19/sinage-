@@ -1,10 +1,17 @@
 package com.signage.player
 
+import android.content.ComponentName
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.PixelCopy
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
@@ -22,11 +29,17 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * The whole app is one fullscreen activity that moves through three states:
@@ -226,12 +239,26 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Remote commands already carried out by this run, so a slow acknowledgement doesn't run one twice.
+        val handled = HashSet<String>()
+
         while (true) {
             var pollSeconds = 30
+            var refresh = false
             try {
                 val json = api.manifest(token)
                 val m = Manifest.parse(json)
                 pollSeconds = m.pollSeconds
+                for (cmd in m.commands) {
+                    if (handled.add(cmd.id)) refresh = runCommand(api, token, cmd, handled) || refresh
+                }
+                if (refresh) {
+                    // Start over: re-check every file and play from the top.
+                    manifest = null
+                    showing = null
+                    screen.stop()
+                    continue
+                }
                 if (m.version != manifest?.version) {
                     cache.sync(api, token, m.media) { done, total, bytes ->
                         // Only show progress on a blank screen; never draw over live content.
@@ -258,6 +285,86 @@ class MainActivity : AppCompatActivity() {
             }
             showActive()
             delay(pollSeconds * 1000L)
+        }
+    }
+
+    // ---------- remote commands ----------
+
+    /** Carries out one command from the CMS. Returns true if playback should start over. */
+    private suspend fun runCommand(api: ApiClient, token: String, cmd: Command, handled: MutableSet<String>): Boolean {
+        suspend fun report(ok: Boolean, message: String): Boolean = try {
+            api.commandDone(token, cmd.id, ok, message)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UnpairedException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
+
+        when (cmd.type) {
+            "refresh" -> {
+                report(true, "Content refreshed")
+                return true
+            }
+            "screenshot" -> try {
+                api.uploadScreenshot(token, captureScreenJpeg())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: UnpairedException) {
+                throw e
+            } catch (e: Exception) {
+                report(false, "Screenshot failed: ${e.message}")
+            }
+            // Only restart once the CMS knows, or the new app would see the same command and restart again.
+            "restart" -> if (report(true, "Restarting the app")) restartApp() else handled.remove(cmd.id)
+            "reboot" -> {
+                if (!report(true, "Rebooting")) {
+                    handled.remove(cmd.id)
+                    return false
+                }
+                withContext(Dispatchers.IO) {
+                    runCatching { Runtime.getRuntime().exec(arrayOf("su", "-c", "reboot")).waitFor() }
+                }
+                delay(10_000)
+                // Still running, so the reboot didn't happen. Most devices only allow it with root.
+                report(false, "This device can't be rebooted remotely (it needs root), so the app was restarted instead.")
+                restartApp()
+            }
+            else -> report(false, "This player version doesn't support \"${cmd.type}\". Update the app.")
+        }
+        return false
+    }
+
+    private fun restartApp() {
+        startActivity(Intent.makeRestartActivityTask(ComponentName(this, MainActivity::class.java)))
+        Runtime.getRuntime().exit(0)
+    }
+
+    /** A picture of what's on screen, video and web pages included where the device allows. */
+    private suspend fun captureScreenJpeg(): ByteArray {
+        val root = window.decorView
+        val bitmap = Bitmap.createBitmap(root.width.coerceAtLeast(1), root.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            suspendCancellableCoroutine { cont ->
+                PixelCopy.request(window, bitmap, { result ->
+                    if (result == PixelCopy.SUCCESS) cont.resume(Unit)
+                    else cont.resumeWithException(IOException("PixelCopy error $result"))
+                }, Handler(Looper.getMainLooper()))
+            }
+        } else {
+            // Older Android can only draw ordinary views; video areas come out black.
+            root.draw(Canvas(bitmap))
+        }
+        return withContext(Dispatchers.Default) {
+            val scale = minOf(1f, 1280f / bitmap.width)
+            val small = if (scale < 1f) {
+                Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+            } else {
+                bitmap
+            }
+            ByteArrayOutputStream().also { small.compress(Bitmap.CompressFormat.JPEG, 75, it) }.toByteArray()
         }
     }
 

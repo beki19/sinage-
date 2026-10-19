@@ -520,6 +520,7 @@ function renderDevices() {
     h("td", { class: "small-text" }, [d.info?.manufacturer, d.info?.model].filter(Boolean).join(" ") || "—",
       d.info?.appVersion ? h("div", {}, `App ${d.info.appVersion}`) : ""),
     h("td", {}, h("div", { class: "inline" },
+      h("button", { class: "ghost small", onclick: () => openControl(d.id) }, d.commands?.length ? "Control ⏳" : "Control"),
       h("button", { class: "ghost small", disabled: !!d.groupId, title: d.groupId ? "This screen follows its group's schedule" : "",
         onclick: () => openScheduleEditor(`Schedule for ${d.name}`, d, async (schedule) => {
         await api("PATCH", `/api/devices/${d.id}`, { schedule });
@@ -563,6 +564,8 @@ function renderGroups() {
         } }, contentOptions(contentValue(g))),
         scheduleSummary(g)),
       h("div", { class: "inline wrap" },
+        h("button", { class: "ghost small", disabled: !members.length, onclick: () => groupCommand(g, "refresh") }, "Refresh all"),
+        h("button", { class: "ghost small", disabled: !members.length, onclick: () => groupCommand(g, "screenshot") }, "Screenshot all"),
         h("button", { class: "ghost small", onclick: () => openScheduleEditor(`Schedule for ${g.name}`, g, async (schedule) => {
           await api("PATCH", `/api/groups/${g.id}`, { schedule });
           await Promise.all([loadGroups(), loadDevices()]);
@@ -579,6 +582,73 @@ function renderGroups() {
       ),
     );
   }));
+}
+
+async function groupCommand(g, type) {
+  try {
+    const { screens } = await api("POST", `/api/groups/${g.id}/commands`, { type });
+    toast(`Sent to ${screens} screen${screens === 1 ? "" : "s"}. They pick it up within 15 seconds.`);
+    loadDevices();
+  } catch (err) { toast(err.message); }
+}
+
+// ---------- remote control + screenshots ----------
+
+const COMMAND_LABELS = { refresh: "refresh", restart: "app restart", reboot: "reboot", screenshot: "screenshot" };
+
+function openControl(deviceId) {
+  const cur = () => state.devices.find((x) => x.id === deviceId);
+  let watching = null;
+
+  const send = async (type, question) => {
+    const x = cur();
+    if (question && !confirm(question)) return;
+    try {
+      await api("POST", `/api/devices/${x.id}/commands`, { type });
+      toast(x.online ? "Sent. The screen picks it up within 15 seconds." : "Sent. The screen is offline, so it will run when it's back (within 10 minutes).");
+      await loadDevices();
+      render();
+      watch();
+    } catch (err) { toast(err.message); }
+  };
+
+  // Re-check every 3 s for a minute so a new screenshot or result shows up without reloading.
+  const watch = () => {
+    clearInterval(watching);
+    let n = 0;
+    watching = setInterval(async () => {
+      if (!$("#dialog").open || ++n > 20) { clearInterval(watching); return; }
+      const before = JSON.stringify(cur());
+      await loadDevices().catch(() => {});
+      if (JSON.stringify(cur()) !== before && $("#dialog").open) render();
+    }, 3000);
+  };
+
+  const render = () => {
+    const x = cur();
+    if (!x) { $("#dialog").close(); return; }
+    const r = x.lastCommandResult;
+    openDialog(x.name,
+      h("div", { class: "shot" }, x.screenshotAt
+        ? h("img", { src: `/api/devices/${x.id}/screenshot?token=${encodeURIComponent(state.token)}&t=${Date.parse(x.screenshotAt)}`, alt: `Screenshot of ${x.name}` })
+        : h("p", { class: "muted" }, "No screenshot yet.")),
+      h("p", { class: "small-text muted" },
+        x.screenshotAt ? `Screenshot taken ${fmtAgo(x.screenshotAt)}. ` : "",
+        x.online ? "Online." : `Offline, last seen ${fmtAgo(x.lastSeen)}.`,
+        x.commands.length ? ` Waiting for the screen to run: ${x.commands.map((c) => COMMAND_LABELS[c.type]).join(", ")}.` : ""),
+      r ? h("p", { class: `small-text ${r.ok ? "muted" : "error"}` },
+        `Last ${COMMAND_LABELS[r.type]} (${fmtAgo(r.at)}): ${r.message || (r.ok ? "done" : "failed")}`) : null,
+      h("div", { class: "inline wrap dialog-actions" },
+        h("button", { onclick: () => send("screenshot") }, "Take screenshot"),
+        h("button", { class: "ghost", title: "Re-check content and play from the top", onclick: () => send("refresh") }, "Refresh content"),
+        h("button", { class: "ghost", onclick: () => send("restart", `Restart the player app on "${x.name}"?`) }, "Restart app"),
+        h("button", { class: "danger", onclick: () => send("reboot",
+          `Reboot "${x.name}"? This only works on rooted devices; on others the app restarts instead.`) }, "Reboot device"),
+      ),
+    );
+  };
+  render();
+  if (cur()?.commands.length) watch();
 }
 
 $("#new-group").addEventListener("submit", async (e) => {
@@ -602,7 +672,7 @@ function openDialog(title, ...body) {
   const dlg = $("#dialog");
   dlg.replaceChildren(
     h("div", { class: "dialog-head" }, h("h2", {}, title), h("button", { class: "ghost small", title: "Close", onclick: () => dlg.close() }, "✕")),
-    ...body,
+    ...body.flat().filter((c) => c != null && c !== false),
   );
   if (!dlg.open) dlg.showModal();
   return dlg;

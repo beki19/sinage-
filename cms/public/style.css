@@ -139,6 +139,9 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 .dialog-head h2 { margin: 0; }
 .dialog-actions { margin-top: 14px; }
 .spacer { flex: 1; }
+.shot { aspect-ratio: 16/9; background: #000; border-radius: 8px; display: grid; place-items: center; overflow: hidden; margin: 8px 0; }
+.shot img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.shot p { color: #9aa0a6; }
 .rules { display: grid; gap: 10px; margin-top: 10px; }
 .rule { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
 .rule .inline input, .rule .inline select { flex: none; min-width: 0; }

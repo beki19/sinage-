@@ -91,9 +91,29 @@ export interface Device {
   schedule: ScheduleRule[];
   /** When set, the screen shows its group's content and schedule instead of its own. */
   groupId: string | null;
+  /** Waiting for the screen to pick up on its next check-in. */
+  commands: DeviceCommand[];
+  lastCommandResult: { type: CommandType; ok: boolean; message: string; at: string } | null;
+  /** When the latest screenshot (data/screenshots/<id>.jpg) arrived. */
+  screenshotAt: string | null;
   pairedAt: string;
   lastSeen: string | null;
   info: Record<string, string>;
+}
+
+/**
+ * refresh:    re-check content and restart playback from the top
+ * restart:    restart the player app
+ * reboot:     reboot the device (needs a rooted device; otherwise the app restarts instead)
+ * screenshot: send a picture of what's on screen
+ */
+export const COMMAND_TYPES = ["refresh", "restart", "reboot", "screenshot"] as const;
+export type CommandType = (typeof COMMAND_TYPES)[number];
+
+export interface DeviceCommand {
+  id: string;
+  type: CommandType;
+  createdAt: string;
 }
 
 /** Screens that all show the same thing, e.g. "All lobby TVs". */
@@ -144,10 +164,22 @@ export class Store {
       d.layoutId ??= null;
       d.schedule ??= [];
       d.groupId ??= null;
+      d.commands ??= [];
+      d.lastCommandResult ??= null;
+      d.screenshotAt ??= null;
     }
   }
 
+  private timer: NodeJS.Timeout | null = null;
+
+  /** Saves within a couple of seconds, so frequent check-ins from many screens share one write. */
+  saveSoon() {
+    this.timer ??= setTimeout(() => this.save(), 2000).unref();
+  }
+
   save() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
     const tmp = this.file + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2));
     fs.renameSync(tmp, this.file);

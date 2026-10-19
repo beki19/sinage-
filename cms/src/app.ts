@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import {
-  Store, type Device, type Group, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
+  COMMAND_TYPES, Store, type CommandType, type Device, type Group, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
 } from "./store.js";
 
 export interface AppOptions {
@@ -87,7 +87,9 @@ type Handler = (req: Request, res: Response) => unknown;
 export function createApp(opts: AppOptions) {
   const store = new Store(opts.dataDir);
   const mediaDir = path.join(opts.dataDir, "media");
+  const screenshotDir = path.join(opts.dataDir, "screenshots");
   fs.mkdirSync(mediaDir, { recursive: true });
+  fs.mkdirSync(screenshotDir, { recursive: true });
   const db = store.data;
 
   const app = express();
@@ -364,6 +366,26 @@ export function createApp(opts: AppOptions) {
     return (kind === "layout" ? db.layouts.find((l) => l.id === refId) : playlistById(refId))?.name ?? null;
   };
 
+  /** Commands older than this are dropped: the screen was probably off, and a stale reboot helps nobody. */
+  const COMMAND_TTL_MS = 10 * 60 * 1000;
+
+  const pendingCommands = (device: Device) => {
+    device.commands = device.commands.filter((c) => Date.now() - Date.parse(c.createdAt) < COMMAND_TTL_MS);
+    return device.commands;
+  };
+
+  const commandType = (raw: unknown): CommandType => {
+    if (!COMMAND_TYPES.includes(raw as CommandType)) throw new HttpError(400, `Command must be one of: ${COMMAND_TYPES.join(", ")}`);
+    return raw as CommandType;
+  };
+
+  const queueCommand = (device: Device, type: CommandType) => {
+    // One of each kind is enough.
+    if (!pendingCommands(device).some((c) => c.type === type)) device.commands.push({ id: id(), type, createdAt: now() });
+  };
+
+  const screenshotFile = (deviceId: string) => path.join(screenshotDir, `${deviceId}.jpg`);
+
   const manifestFor = (device: Device) => {
     const a = assignmentOf(device);
     const defaultProgram = contentRef(a);
@@ -392,7 +414,9 @@ export function createApp(opts: AppOptions) {
       programs,
       defaultProgram,
       schedule,
-      pollSeconds: 30,
+      // Not part of `version`: they don't change what's on screen.
+      commands: pendingCommands(device).map(({ id: cid, type }) => ({ id: cid, type })),
+      pollSeconds: 15,
     };
   };
 
@@ -604,6 +628,9 @@ export function createApp(opts: AppOptions) {
       layoutId: null,
       schedule: [],
       groupId: null,
+      commands: [],
+      lastCommandResult: null,
+      screenshotAt: null,
       pairedAt: now(),
       lastSeen: null,
       info: pairing.info,
@@ -628,8 +655,31 @@ export function createApp(opts: AppOptions) {
   app.delete("/api/devices/:id", requireAdmin, route((req, res) => {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     db.devices = db.devices.filter((x) => x !== d);
+    fs.rmSync(screenshotFile(d.id), { force: true });
     store.save();
     res.status(204).end();
+  }));
+
+  app.post("/api/devices/:id/commands", requireAdmin, route((req, res) => {
+    const d = findOr404(db.devices, String(req.params.id), "Device");
+    queueCommand(d, commandType(req.body?.type));
+    store.save();
+    res.status(202).json(publicDevice(d));
+  }));
+
+  app.post("/api/groups/:id/commands", requireAdmin, route((req, res) => {
+    const g = findOr404(db.groups, String(req.params.id), "Group");
+    const type = commandType(req.body?.type);
+    const members = db.devices.filter((d) => d.groupId === g.id);
+    for (const d of members) queueCommand(d, type);
+    store.save();
+    res.status(202).json({ screens: members.length });
+  }));
+
+  app.get("/api/devices/:id/screenshot", requireAdmin, route((req, res) => {
+    const d = findOr404(db.devices, String(req.params.id), "Device");
+    if (!d.screenshotAt || !fs.existsSync(screenshotFile(d.id))) throw new HttpError(404, "No screenshot yet");
+    res.set("cache-control", "no-store").type("image/jpeg").sendFile(screenshotFile(d.id));
   }));
 
   // ---------- player API ----------
@@ -672,8 +722,37 @@ export function createApp(opts: AppOptions) {
     device.lastSeen = now();
     const appVersion = req.header("x-player-version");
     if (appVersion) device.info.appVersion = appVersion.slice(0, 50);
-    store.save();
+    store.saveSoon();
     res.json(manifestFor(device));
+  }));
+
+  /** The screen reports how a command went. It may report twice (e.g. "rebooting", then "couldn't"). */
+  app.post("/api/player/commands/:id/done", requireDevice, route((req, res) => {
+    const device = res.locals.device as Device;
+    const cid = String(req.params.id);
+    const cmd = device.commands.find((c) => c.id === cid);
+    const type = cmd?.type ?? device.lastCommandResult?.type;
+    device.commands = device.commands.filter((c) => c.id !== cid);
+    if (type) {
+      device.lastCommandResult = {
+        type,
+        ok: req.body?.ok !== false,
+        message: typeof req.body?.message === "string" ? req.body.message.slice(0, 300) : "",
+        at: now(),
+      };
+    }
+    store.save();
+    res.status(204).end();
+  }));
+
+  app.post("/api/player/screenshot", requireDevice, express.raw({ type: ["image/jpeg", "image/png"], limit: "10mb" }), route((req, res) => {
+    const device = res.locals.device as Device;
+    if (!Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, "Send a JPEG image");
+    fs.writeFileSync(screenshotFile(device.id), req.body);
+    device.screenshotAt = now();
+    device.commands = device.commands.filter((c) => c.type !== "screenshot");
+    store.save();
+    res.status(204).end();
   }));
 
   app.get("/api/player/media/:id", requireDevice, route((req, res) => {

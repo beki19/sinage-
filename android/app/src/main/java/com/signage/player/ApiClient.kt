@@ -41,6 +41,28 @@ class ApiClient(baseUrl: String) {
         return text
     }
 
+    /** Tells the CMS how a remote command went. */
+    suspend fun commandDone(token: String, commandId: String, ok: Boolean, message: String) {
+        val body = JSONObject().put("ok", ok).put("message", message).toString()
+        val (code, _) = requestRaw("POST", "/api/player/commands/" + java.net.URLEncoder.encode(commandId, "UTF-8") + "/done", body, token)
+        if (code == 401) throw UnpairedException()
+        if (code !in 200..299) throw IOException("HTTP $code")
+    }
+
+    suspend fun uploadScreenshot(token: String, jpeg: ByteArray): Unit = withContext(Dispatchers.IO) {
+        val conn = open("POST", "/api/player/screenshot", token)
+        try {
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "image/jpeg")
+            conn.setFixedLengthStreamingMode(jpeg.size)
+            conn.outputStream.use { it.write(jpeg) }
+            if (conn.responseCode == 401) throw UnpairedException()
+            if (conn.responseCode !in 200..299) throw IOException("HTTP ${conn.responseCode}")
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     /** Downloads to [dest] via a temp file and checks the SHA-256, so a half-written file is never played. */
     suspend fun download(path: String, token: String, dest: File, expectedSha256: String, onProgress: (Long) -> Unit): Unit =
         withContext(Dispatchers.IO) {
