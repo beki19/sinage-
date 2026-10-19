@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import {
-  COMMAND_TYPES, ROLES, Store, type CommandType, type Device, type Group, type Role, type User, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
+  COMMAND_TYPES, ROLES, Store, type CommandType, type Device, type Group, type Role, type ScreenEvent, type User, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
 } from "./store.js";
 
 export interface AppOptions {
@@ -157,7 +157,7 @@ export function createApp(opts: AppOptions) {
 
   const requireAdminRole = (req: Request, res: Response, next: NextFunction) => {
     const user = currentUser(req);
-    if (user.role !== "admin") throw new HttpError(403, "Only admins can manage user accounts");
+    if (user.role !== "admin") throw new HttpError(403, "Only admins can do this");
     res.locals.user = user;
     next();
   };
@@ -744,6 +744,7 @@ export function createApp(opts: AppOptions) {
       commands: [],
       lastCommandResult: null,
       screenshotAt: null,
+      alertState: null,
       pairedAt: now(),
       lastSeen: null,
       info: pairing.info,
@@ -793,6 +794,90 @@ export function createApp(opts: AppOptions) {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     if (!d.screenshotAt || !fs.existsSync(screenshotFile(d.id))) throw new HttpError(404, "No screenshot yet");
     res.set("cache-control", "no-store").type("image/jpeg").sendFile(screenshotFile(d.id));
+  }));
+
+  // ---------- dashboard + offline alerts ----------
+
+  const sendWebhook = async (url: string, payload: Record<string, unknown>) => {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // "text" suits Slack, Mattermost and Google Chat; "content" suits Discord.
+      body: JSON.stringify({ text: payload.message, content: payload.message, ...payload }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`The alert address answered HTTP ${res.status}`);
+  };
+
+  /** Records screens that went offline or came back, and posts each change to the alert webhook. */
+  const checkAlerts = async () => {
+    const limit = db.settings.offlineAfterMinutes * 60 * 1000;
+    const changes: ScreenEvent[] = [];
+    for (const d of db.devices) {
+      const state = d.lastSeen && Date.now() - Date.parse(d.lastSeen) < limit ? "online" : "offline";
+      const before = d.alertState;
+      d.alertState = state;
+      // The first look at a screen (new, or just after an upgrade) only sets a baseline.
+      if (before === null || before === state) continue;
+      changes.push({ id: id(), at: now(), type: state, deviceId: d.id, deviceName: d.name });
+    }
+    if (!changes.length) {
+      store.saveSoon();
+      return;
+    }
+    db.events = [...changes.reverse(), ...db.events].slice(0, 200);
+    store.save();
+    const url = db.settings.alertWebhookUrl;
+    if (!url) return;
+    for (const e of changes) {
+      const device = db.devices.find((d) => d.id === e.deviceId);
+      const message = e.type === "offline"
+        ? `⚠️ Screen "${e.deviceName}" is offline (last seen ${device?.lastSeen ? new Date(device.lastSeen).toLocaleString() : "never"})`
+        : `✅ Screen "${e.deviceName}" is back online`;
+      await sendWebhook(url, { event: e.type, message, screen: { id: e.deviceId, name: e.deviceName }, lastSeen: device?.lastSeen ?? null, at: e.at })
+        .catch((err) => console.warn(`Alert webhook failed: ${err.message}`));
+    }
+  };
+  setInterval(() => void checkAlerts(), 30_000).unref();
+
+  app.get("/api/dashboard", requireLogin, route((_req, res) => {
+    const screens = db.devices.map(publicDevice);
+    const offline = screens.filter((d) => !d.online)
+      .sort((a, b) => (b.lastSeen ?? "").localeCompare(a.lastSeen ?? ""))
+      .map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen }));
+    res.json({
+      screens: { total: screens.length, online: screens.length - offline.length, offline: offline.length },
+      offline,
+      media: { count: db.media.length, bytes: db.media.reduce((s, m) => s + m.size, 0) },
+      counts: { playlists: db.playlists.length, layouts: db.layouts.length, groups: db.groups.length, users: db.users.length + 1 },
+      events: db.events.slice(0, 50),
+      alertsOn: !!db.settings.alertWebhookUrl,
+    });
+  }));
+
+  app.get("/api/settings", requireAdminRole, route((_req, res) => res.json(db.settings)));
+
+  app.put("/api/settings", requireAdminRole, route((req, res) => {
+    if (req.body?.alertWebhookUrl !== undefined) {
+      db.settings.alertWebhookUrl = req.body.alertWebhookUrl ? httpUrl(req.body.alertWebhookUrl, "Alert address") : "";
+    }
+    if (req.body?.offlineAfterMinutes !== undefined) {
+      const m = Number(req.body.offlineAfterMinutes);
+      if (!Number.isInteger(m) || m < 2 || m > 1440) throw new HttpError(400, "Offline after must be 2-1440 minutes");
+      db.settings.offlineAfterMinutes = m;
+    }
+    store.save();
+    res.json(db.settings);
+  }));
+
+  app.post("/api/settings/test-alert", requireAdminRole, route(async (_req, res) => {
+    if (!db.settings.alertWebhookUrl) throw new HttpError(400, "Save an alert address first");
+    try {
+      await sendWebhook(db.settings.alertWebhookUrl, { event: "test", message: "🔔 Test alert from your Signage CMS", at: now() });
+    } catch (err) {
+      throw new HttpError(502, (err as Error).message);
+    }
+    res.status(204).end();
   }));
 
   // ---------- player API ----------
@@ -889,5 +974,5 @@ export function createApp(opts: AppOptions) {
     res.status(500).json({ error: "Internal server error" });
   });
 
-  return { app, store };
+  return { app, store, checkAlerts };
 }

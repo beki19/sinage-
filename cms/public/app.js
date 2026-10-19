@@ -96,8 +96,58 @@ document.querySelectorAll("header nav button").forEach((btn) =>
     document.querySelectorAll("header nav button").forEach((b) => b.classList.toggle("active", b === btn));
     document.querySelectorAll(".tab").forEach((t) => (t.hidden = t.id !== `tab-${btn.dataset.tab}`));
     if (btn.dataset.tab === "devices") loadDevices();
+    if (btn.dataset.tab === "dashboard") loadDashboard();
   }),
 );
+
+// ---------- dashboard ----------
+
+async function loadDashboard() {
+  const d = await api("GET", "/api/dashboard");
+  const stat = (label, value, note, cls = "") => h("div", { class: `stat card ${cls}` },
+    h("div", { class: "stat-value" }, value), h("div", { class: "stat-label" }, label), note ? h("div", { class: "small-text muted" }, note) : null);
+  $("#stats").replaceChildren(
+    stat("Screens online", `${d.screens.online} / ${d.screens.total}`, d.screens.total ? null : "Pair one in the Screens tab", d.screens.total && !d.screens.offline ? "good" : ""),
+    stat("Offline", String(d.screens.offline), d.alertsOn ? "Alerts on" : "Alerts off", d.screens.offline ? "bad" : ""),
+    stat("Media", String(d.media.count), fmtSize(d.media.bytes)),
+    stat("Playlists · layouts", `${d.counts.playlists} · ${d.counts.layouts}`, `${d.counts.groups} group${d.counts.groups === 1 ? "" : "s"}`),
+  );
+  $("#offline-list").replaceChildren(d.offline.length
+    ? h("ul", { class: "plain" }, d.offline.map((s) => h("li", {},
+        h("span", { class: "dot off" }), h("strong", {}, s.name), h("span", { class: "muted" }, ` · last seen ${fmtAgo(s.lastSeen)}`))))
+    : h("p", { class: "muted" }, d.screens.total ? "All screens are online." : "No screens yet."));
+  $("#event-list").replaceChildren(d.events.length
+    ? h("ul", { class: "plain" }, d.events.slice(0, 15).map((e) => h("li", {},
+        h("span", { class: `dot ${e.type === "online" ? "on" : "off"}` }),
+        `${e.deviceName} ${e.type === "online" ? "came back online" : "went offline"}`,
+        h("span", { class: "muted" }, ` · ${fmtAgo(e.at)}`))))
+    : h("p", { class: "muted" }, "Screens going offline and coming back will show up here."));
+  if (state.me?.role === "admin") {
+    const s = await api("GET", "/api/settings");
+    const f = $("#alert-settings");
+    if (document.activeElement?.form !== f) {
+      f.alertWebhookUrl.value = s.alertWebhookUrl;
+      f.offlineAfterMinutes.value = s.offlineAfterMinutes;
+    }
+  }
+}
+
+$("#alert-settings").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api("PUT", "/api/settings", { alertWebhookUrl: f.alertWebhookUrl.value.trim(), offlineAfterMinutes: Number(f.offlineAfterMinutes.value) });
+    toast("Alert settings saved");
+    loadDashboard();
+  } catch (err) { toast(err.message); }
+});
+
+$("#test-alert").addEventListener("click", async () => {
+  try {
+    await api("POST", "/api/settings/test-alert");
+    toast("Test alert sent. Check your channel.");
+  } catch (err) { toast(err.message); }
+});
 
 // ---------- media ----------
 
@@ -813,11 +863,15 @@ async function start() {
     state.me = await api("GET", "/api/me");
     document.body.dataset.role = state.me.role;
     $("#account").textContent = `${state.me.username} · ${ROLE_NAMES[state.me.role]}`;
-    await Promise.all([loadMedia(), loadPlaylists(), loadLayouts(), loadGroups(), loadDevices(), loadUsers()]);
+    await Promise.all([loadMedia(), loadPlaylists(), loadLayouts(), loadGroups(), loadDevices(), loadUsers(), loadDashboard()]);
   } catch { /* 401 already handled */ }
 }
 
-setInterval(() => { if (state.token && !$("#tab-devices").hidden) loadDevices().catch(() => {}); }, 10000);
+setInterval(() => {
+  if (!state.token) return;
+  if (!$("#tab-devices").hidden) loadDevices().catch(() => {});
+  if (!$("#tab-dashboard").hidden) loadDashboard().catch(() => {});
+}, 10000);
 window.addEventListener("beforeunload", (e) => { if (state.draft?.dirty) e.preventDefault(); });
 
 if (state.token) start(); else showLogin();

@@ -96,6 +96,8 @@ export interface Device {
   lastCommandResult: { type: CommandType; ok: boolean; message: string; at: string } | null;
   /** When the latest screenshot (data/screenshots/<id>.jpg) arrived. */
   screenshotAt: string | null;
+  /** Last state the alert checker saw, so it alerts once per change. null until first checked. */
+  alertState: "online" | "offline" | null;
   pairedAt: string;
   lastSeen: string | null;
   info: Record<string, string>;
@@ -151,6 +153,22 @@ export interface Session {
   userId?: string | null;
 }
 
+export interface Settings {
+  /** Gets a JSON POST when a screen goes offline or comes back. Empty = no alerts. */
+  alertWebhookUrl: string;
+  /** How long a screen may miss check-ins before it counts as offline. */
+  offlineAfterMinutes: number;
+}
+
+/** A screen going offline or coming back, for the dashboard. */
+export interface ScreenEvent {
+  id: string;
+  at: string;
+  type: "offline" | "online";
+  deviceId: string;
+  deviceName: string;
+}
+
 export interface PendingPairing {
   code: string;
   pollToken: string;
@@ -169,9 +187,15 @@ export interface Data {
   pairings: PendingPairing[];
   users: User[];
   sessions: Session[];
+  settings: Settings;
+  events: ScreenEvent[];
 }
 
-const empty = (): Data => ({ media: [], playlists: [], layouts: [], devices: [], groups: [], pairings: [], users: [], sessions: [] });
+const empty = (): Data => ({
+  media: [], playlists: [], layouts: [], devices: [], groups: [], pairings: [], users: [], sessions: [],
+  settings: { alertWebhookUrl: "", offlineAfterMinutes: 5 },
+  events: [],
+});
 
 /** Small JSON-file database. Fine for hundreds of screens; swap for SQL beyond that. */
 export class Store {
@@ -193,7 +217,9 @@ export class Store {
       d.commands ??= [];
       d.lastCommandResult ??= null;
       d.screenshotAt ??= null;
+      d.alertState ??= null;
     }
+    this.data.settings = { ...empty().settings, ...this.data.settings };
   }
 
   private timer: NodeJS.Timeout | null = null;

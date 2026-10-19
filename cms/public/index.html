@@ -21,7 +21,8 @@
     <header>
       <strong>Signage CMS</strong>
       <nav>
-        <button data-tab="media" class="active">Media</button>
+        <button data-tab="dashboard" class="active">Dashboard</button>
+        <button data-tab="media">Media</button>
         <button data-tab="playlists">Playlists</button>
         <button data-tab="layouts">Layouts</button>
         <button data-tab="devices">Screens</button>
@@ -33,7 +34,37 @@
 
     <main>
       <p class="viewer-note card">You're signed in with a view-only account. Ask an admin if you need to make changes.</p>
-      <section id="tab-media" class="tab">
+      <section id="tab-dashboard" class="tab">
+        <div id="stats" class="stats"></div>
+        <div class="split-even">
+          <div class="card">
+            <h2>Offline screens</h2>
+            <div id="offline-list"></div>
+          </div>
+          <div class="card">
+            <h2>Recent activity</h2>
+            <div id="event-list"></div>
+          </div>
+        </div>
+        <form id="alert-settings" class="card admin-only">
+          <h2>Offline alerts</h2>
+          <p class="muted small-text">
+            When a screen stops checking in, the CMS can post a message to a web address (a "webhook"),
+            e.g. a Slack, Discord, Microsoft Teams or Google Chat channel, or an ntfy.sh topic for phone notifications.
+            It posts again when the screen comes back.
+          </p>
+          <div class="inline wrap">
+            <input name="alertWebhookUrl" type="url" placeholder="https://hooks.slack.com/services/…" class="grow">
+            <label class="inline small-text">Offline after <input name="offlineAfterMinutes" type="number" min="2" max="1440" class="minutes"> minutes</label>
+          </div>
+          <div class="inline wrap dialog-actions">
+            <button type="submit">Save</button>
+            <button type="button" class="ghost" id="test-alert">Send a test alert</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="tab-media" class="tab" hidden>
         <label id="dropzone" class="dropzone edit-only">
           <input type="file" id="file-input" accept="image/*,video/*" multiple hidden>
           <span>Drop images or videos here, or click to choose files</span>

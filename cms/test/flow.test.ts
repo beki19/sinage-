@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
@@ -13,12 +14,13 @@ let base = "";
 let dataDir = "";
 let admin = "";
 let flush = () => {};
+let app!: ReturnType<typeof createApp>;
 
 before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "signage-test-"));
-  const { app, store } = createApp({ dataDir, adminPassword: "secret" });
-  flush = () => store.save(); // writes any pending save now, so no timer fires after the folder is gone
-  server = app.listen(0);
+  app = createApp({ dataDir, adminPassword: "secret" });
+  flush = () => app.store.save(); // writes any pending save now, so no timer fires after the folder is gone
+  server = app.app.listen(0);
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -328,4 +330,49 @@ test("user accounts: roles, view-only, password changes, deleting logs out", asy
   assert.equal((await api("POST", "/api/playlists", { name: "By promoted" }, viewer)).status, 201);
   assert.equal((await api("DELETE", `/api/users/${vic.id}`, undefined, admin)).status, 204);
   assert.equal((await api("GET", "/api/playlists", undefined, viewer)).status, 401);
+});
+
+test("dashboard and offline alerts", async () => {
+  // A stand-in for Slack/Discord that records what it receives.
+  const received: { event: string; text: string; screen?: { name: string } }[] = [];
+  const hook = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c)).on("end", () => { received.push(JSON.parse(body)); res.end("ok"); });
+  });
+  hook.listen(0);
+  await new Promise((r) => hook.once("listening", r));
+  const hookUrl = `http://127.0.0.1:${(hook.address() as AddressInfo).port}/hook`;
+
+  try {
+    const viewer = (await api("POST", "/api/users", { username: "dash", password: "dashboard1", role: "viewer" }, admin)).json;
+    const viewerAuth = `Bearer ${(await api("POST", "/api/login", { username: "dash", password: "dashboard1" })).json.token}`;
+    assert.equal((await api("GET", "/api/settings", undefined, viewerAuth)).status, 403);
+    assert.equal((await api("PUT", "/api/settings", { offlineAfterMinutes: 1 }, admin)).status, 400);
+    assert.equal((await api("PUT", "/api/settings", { alertWebhookUrl: "ftp://x" }, admin)).status, 400);
+    assert.equal((await api("PUT", "/api/settings", { alertWebhookUrl: hookUrl, offlineAfterMinutes: 2 }, admin)).status, 200);
+    assert.equal((await api("POST", "/api/settings/test-alert", undefined, admin)).status, 204);
+    assert.equal(received.at(-1)?.event, "test");
+
+    const screen = await pairScreen("Watched TV");
+    await api("GET", "/api/player/manifest", undefined, screen.auth);
+    await app.checkAlerts(); // baseline: online, no alert
+    const device = app.store.data.devices.find((d) => d.id === screen.id)!;
+    device.lastSeen = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+    await app.checkAlerts();
+    assert.equal(received.at(-1)?.event, "offline");
+    assert.match(received.at(-1)!.text, /Watched TV/);
+    await app.checkAlerts();
+    assert.equal(received.filter((r) => r.event === "offline").length, 1, "one alert per change");
+    await api("GET", "/api/player/manifest", undefined, screen.auth);
+    await app.checkAlerts();
+    assert.equal(received.at(-1)?.event, "online");
+
+    const dash = (await api("GET", "/api/dashboard", undefined, viewerAuth)).json;
+    assert.ok(dash.screens.total >= 1);
+    assert.equal(dash.alertsOn, true);
+    assert.deepEqual(dash.events.slice(0, 2).map((e: { type: string }) => e.type), ["online", "offline"]);
+    await api("DELETE", `/api/users/${viewer.id}`, undefined, admin);
+  } finally {
+    hook.close();
+  }
 });
