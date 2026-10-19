@@ -10,7 +10,8 @@
   <section id="login" class="login" hidden>
     <form id="login-form" class="card">
       <h1>Signage CMS</h1>
-      <label>Admin password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
+      <label>Username <input name="username" autocomplete="username" placeholder="admin" autofocus></label>
+      <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
       <button type="submit">Log in</button>
       <p class="error" id="login-error"></p>
     </form>
@@ -24,13 +25,16 @@
         <button data-tab="playlists">Playlists</button>
         <button data-tab="layouts">Layouts</button>
         <button data-tab="devices">Screens</button>
+        <button data-tab="users" class="admin-only">Users</button>
       </nav>
+      <button id="account" class="ghost small" title="Your account"></button>
       <button id="logout" class="ghost">Log out</button>
     </header>
 
     <main>
+      <p class="viewer-note card">You're signed in with a view-only account. Ask an admin if you need to make changes.</p>
       <section id="tab-media" class="tab">
-        <label id="dropzone" class="dropzone">
+        <label id="dropzone" class="dropzone edit-only">
           <input type="file" id="file-input" accept="image/*,video/*" multiple hidden>
           <span>Drop images or videos here, or click to choose files</span>
           <progress id="upload-progress" max="100" value="0" hidden></progress>
@@ -43,7 +47,7 @@
           <aside class="card">
             <h2>Playlists</h2>
             <ul id="playlist-list" class="list"></ul>
-            <form id="new-playlist" class="inline">
+            <form id="new-playlist" class="inline edit-only">
               <input name="name" placeholder="New playlist name" required>
               <button type="submit">Add</button>
             </form>
@@ -60,7 +64,7 @@
             <h2>Layouts</h2>
             <p class="muted small-text">Split the screen into zones, each playing its own playlist, e.g. a video with a ticker along the bottom.</p>
             <ul id="layout-list" class="list"></ul>
-            <form id="new-layout" class="inline">
+            <form id="new-layout" class="inline edit-only">
               <input name="name" placeholder="New layout name" required>
               <button type="submit">Add</button>
             </form>
@@ -71,8 +75,28 @@
         </div>
       </section>
 
+      <section id="tab-users" class="tab" hidden>
+        <div class="card">
+          <h2>User accounts</h2>
+          <p class="muted small-text">
+            <strong>Admin</strong>: everything, including accounts. <strong>Editor</strong>: media, playlists, layouts and screens.
+            <strong>Viewer</strong>: can look but not change anything. The built-in <code>admin</code> login always works with the server's ADMIN_PASSWORD.
+          </p>
+          <table class="users">
+            <thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead>
+            <tbody id="user-rows"></tbody>
+          </table>
+          <form id="new-user" class="inline wrap">
+            <input name="username" placeholder="Username" required autocomplete="off">
+            <input name="password" type="password" placeholder="Password (8+ characters)" required minlength="8" autocomplete="new-password">
+            <select name="role"><option value="editor">Editor</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select>
+            <button type="submit">Add user</button>
+          </form>
+        </div>
+      </section>
+
       <section id="tab-devices" class="tab" hidden>
-        <form id="pair-form" class="card pair">
+        <form id="pair-form" class="card pair edit-only">
           <h2>Add a screen</h2>
           <p class="muted">Open the player app on the screen. Type the code it shows.</p>
           <div class="inline wrap">
@@ -87,7 +111,7 @@
           <h2>Groups</h2>
           <p class="muted small-text">Put screens in a group to give them all the same content and schedule in one go.</p>
           <div id="group-rows" class="group-rows"></div>
-          <form id="new-group" class="inline">
+          <form id="new-group" class="inline edit-only">
             <input name="name" placeholder="New group, e.g. All lobby TVs" required>
             <button type="submit">Add group</button>
           </form>

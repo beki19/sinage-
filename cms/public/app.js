@@ -4,6 +4,7 @@
 
 const state = {
   token: localStorage.getItem("token"),
+  me: null, users: [],
   media: [], playlists: [], layouts: [], devices: [], groups: [],
   selectedPlaylist: null, draft: null,
   selectedLayout: null, layoutDraft: null,
@@ -73,7 +74,7 @@ $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   $("#login-error").textContent = "";
   try {
-    const { token } = await api("POST", "/api/login", { password: e.target.password.value });
+    const { token } = await api("POST", "/api/login", { username: e.target.username.value, password: e.target.password.value });
     state.token = token;
     localStorage.setItem("token", token);
     e.target.reset();
@@ -730,13 +731,89 @@ $("#pair-form").addEventListener("submit", async (e) => {
   } catch (err) { $("#pair-error").textContent = err.message; }
 });
 
+// ---------- user accounts ----------
+
+const ROLE_NAMES = { admin: "Admin", editor: "Editor", viewer: "Viewer" };
+
+async function loadUsers() {
+  if (state.me?.role !== "admin") return;
+  state.users = await api("GET", "/api/users");
+  renderUsers();
+}
+
+function renderUsers() {
+  $("#user-rows").replaceChildren(
+    h("tr", {}, h("td", {}, h("strong", {}, "admin"), h("div", { class: "small-text muted" }, "Built-in, uses ADMIN_PASSWORD")),
+      h("td", {}, "Admin"), h("td", {}, "—"), h("td")),
+    ...state.users.map((u) => h("tr", {},
+      h("td", {}, h("strong", {}, u.username), u.id === state.me?.id ? h("span", { class: "muted small-text" }, " (you)") : ""),
+      h("td", {}, h("select", { onchange: async (e) => {
+        try { await api("PATCH", `/api/users/${u.id}`, { role: e.target.value }); toast("Role changed"); }
+        catch (err) { toast(err.message); }
+        loadUsers();
+      } }, Object.entries(ROLE_NAMES).map(([v, label]) => h("option", { value: v, selected: v === u.role }, label)))),
+      h("td", { class: "small-text" }, new Date(u.createdAt).toLocaleDateString()),
+      h("td", {}, h("div", { class: "inline" },
+        h("button", { class: "ghost small", onclick: async () => {
+          const password = prompt(`New password for ${u.username} (8+ characters). They'll be logged out everywhere.`);
+          if (!password) return;
+          try { await api("PATCH", `/api/users/${u.id}`, { password }); toast("Password reset"); }
+          catch (err) { toast(err.message); }
+        } }, "Reset password"),
+        h("button", { class: "danger small", onclick: async () => {
+          if (!confirm(`Delete the account "${u.username}"? They'll be logged out.`)) return;
+          await api("DELETE", `/api/users/${u.id}`);
+          loadUsers();
+        } }, "Delete"),
+      )),
+    )),
+  );
+}
+
+$("#new-user").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api("POST", "/api/users", { username: f.username.value, password: f.password.value, role: f.role.value });
+    f.reset();
+    toast("User added");
+    loadUsers();
+  } catch (err) { toast(err.message); }
+});
+
+$("#account").addEventListener("click", () => {
+  const me = state.me;
+  if (!me.id) {
+    openDialog("Your account",
+      h("p", {}, "You're signed in as the built-in ", h("strong", {}, "admin"), "."),
+      h("p", { class: "muted" }, "Its password is the ADMIN_PASSWORD setting the server starts with. To change it, restart the server with a new ADMIN_PASSWORD. You can also create named accounts in the Users tab."));
+    return;
+  }
+  const form = h("form", { class: "stack" },
+    h("label", {}, "Current password", h("input", { type: "password", name: "current", required: true, autocomplete: "current-password" })),
+    h("label", {}, "New password (8+ characters)", h("input", { type: "password", name: "password", required: true, minlength: 8, autocomplete: "new-password" })),
+    h("button", { type: "submit" }, "Change password"));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("POST", "/api/me/password", { current: form.current.value, password: form.password.value });
+      $("#dialog").close();
+      toast("Password changed");
+    } catch (err) { toast(err.message); }
+  });
+  openDialog(`Signed in as ${me.username} (${ROLE_NAMES[me.role]})`, form);
+});
+
 // ---------- boot ----------
 
 async function start() {
   $("#login").hidden = true;
   $("#main").hidden = false;
   try {
-    await Promise.all([loadMedia(), loadPlaylists(), loadLayouts(), loadGroups(), loadDevices()]);
+    state.me = await api("GET", "/api/me");
+    document.body.dataset.role = state.me.role;
+    $("#account").textContent = `${state.me.username} · ${ROLE_NAMES[state.me.role]}`;
+    await Promise.all([loadMedia(), loadPlaylists(), loadLayouts(), loadGroups(), loadDevices(), loadUsers()]);
   } catch { /* 401 already handled */ }
 }
 

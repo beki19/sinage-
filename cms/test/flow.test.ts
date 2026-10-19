@@ -292,3 +292,40 @@ test("remote commands and screenshots", async () => {
   assert.deepEqual([dev.lastCommandResult.type, dev.lastCommandResult.ok, dev.lastCommandResult.message], ["reboot", false, "Needs root"]);
   assert.ok(dev.screenshotAt);
 });
+
+test("user accounts: roles, view-only, password changes, deleting logs out", async () => {
+  // Built-in admin works with or without a username.
+  assert.equal((await api("POST", "/api/login", { username: "admin", password: "secret" })).status, 200);
+  assert.equal((await api("GET", "/api/me", undefined, admin)).json.role, "admin");
+
+  assert.equal((await api("POST", "/api/users", { username: "admin", password: "longenough" }, admin)).status, 409);
+  assert.equal((await api("POST", "/api/users", { username: "sam", password: "short" }, admin)).status, 400);
+  assert.equal((await api("POST", "/api/users", { username: "sam", password: "longenough", role: "boss" }, admin)).status, 400);
+  const sam = await api("POST", "/api/users", { username: "sam", password: "longenough", role: "editor" }, admin);
+  assert.equal(sam.status, 201);
+  assert.equal(sam.json.passwordHash, undefined);
+  const vic = (await api("POST", "/api/users", { username: "vic", password: "viewonly1", role: "viewer" }, admin)).json;
+
+  assert.equal((await api("POST", "/api/login", { username: "SAM", password: "wrongpass" })).status, 401);
+  assert.equal((await api("POST", "/api/login", { username: "nobody", password: "longenough" })).status, 401);
+  const editor = `Bearer ${(await api("POST", "/api/login", { username: "SAM", password: "longenough" })).json.token}`;
+  const viewer = `Bearer ${(await api("POST", "/api/login", { username: "vic", password: "viewonly1" })).json.token}`;
+
+  // Editors manage content but not users; viewers only look.
+  assert.equal((await api("POST", "/api/playlists", { name: "By editor" }, editor)).status, 201);
+  assert.equal((await api("GET", "/api/users", undefined, editor)).status, 403);
+  assert.equal((await api("GET", "/api/playlists", undefined, viewer)).status, 200);
+  assert.equal((await api("POST", "/api/playlists", { name: "By viewer" }, viewer)).status, 403);
+  assert.equal((await api("GET", "/api/me", undefined, viewer)).json.username, "vic");
+
+  // Own password change.
+  assert.equal((await api("POST", "/api/me/password", { current: "nope", password: "newpassword" }, editor)).status, 400);
+  assert.equal((await api("POST", "/api/me/password", { current: "longenough", password: "newpassword" }, editor)).status, 204);
+  assert.equal((await api("POST", "/api/login", { username: "sam", password: "newpassword" })).status, 200);
+
+  // Promoting takes effect at once; deleting logs the user out.
+  await api("PATCH", `/api/users/${vic.id}`, { role: "editor" }, admin);
+  assert.equal((await api("POST", "/api/playlists", { name: "By promoted" }, viewer)).status, 201);
+  assert.equal((await api("DELETE", `/api/users/${vic.id}`, undefined, admin)).status, 204);
+  assert.equal((await api("GET", "/api/playlists", undefined, viewer)).status, 401);
+});

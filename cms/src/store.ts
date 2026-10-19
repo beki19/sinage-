@@ -126,6 +126,31 @@ export interface Group {
   createdAt: string;
 }
 
+/**
+ * admin:  everything, including user accounts
+ * editor: media, playlists, layouts, screens and groups
+ * viewer: can look but not change anything
+ */
+export const ROLES = ["admin", "editor", "viewer"] as const;
+export type Role = (typeof ROLES)[number];
+
+export interface User {
+  id: string;
+  username: string;
+  role: Role;
+  /** scrypt hash of the password, hex */
+  passwordHash: string;
+  salt: string;
+  createdAt: string;
+}
+
+export interface Session {
+  token: string;
+  createdAt: string;
+  /** null for the built-in "admin" login that uses ADMIN_PASSWORD. */
+  userId?: string | null;
+}
+
 export interface PendingPairing {
   code: string;
   pollToken: string;
@@ -142,10 +167,11 @@ export interface Data {
   devices: Device[];
   groups: Group[];
   pairings: PendingPairing[];
-  sessions: { token: string; createdAt: string }[];
+  users: User[];
+  sessions: Session[];
 }
 
-const empty = (): Data => ({ media: [], playlists: [], layouts: [], devices: [], groups: [], pairings: [], sessions: [] });
+const empty = (): Data => ({ media: [], playlists: [], layouts: [], devices: [], groups: [], pairings: [], users: [], sessions: [] });
 
 /** Small JSON-file database. Fine for hundreds of screens; swap for SQL beyond that. */
 export class Store {

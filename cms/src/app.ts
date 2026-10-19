@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import {
-  COMMAND_TYPES, Store, type CommandType, type Device, type Group, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
+  COMMAND_TYPES, ROLES, Store, type CommandType, type Device, type Group, type Role, type User, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
 } from "./store.js";
 
 export interface AppOptions {
@@ -42,6 +42,21 @@ export function ruleMatches(rule: Pick<ScheduleRule, "days" | "start" | "end">, 
   // Runs past midnight: the evening of a listed day, or the early hours after one.
   return (rule.days.includes(day) && t >= start) || (rule.days.includes((day + 6) % 7) && t < end);
 }
+
+/** The login that uses ADMIN_PASSWORD. No user account may take this name. */
+const BUILTIN_ADMIN = "admin";
+
+function hashPassword(password: string, salt = crypto.randomBytes(16).toString("hex")) {
+  return { salt, passwordHash: crypto.scryptSync(password, salt, 64).toString("hex") };
+}
+
+function checkPassword(user: Pick<User, "salt" | "passwordHash">, password: string): boolean {
+  const actual = crypto.scryptSync(password, user.salt, 64);
+  const expected = Buffer.from(user.passwordHash, "hex");
+  return expected.length === actual.length && crypto.timingSafeEqual(actual, expected);
+}
+
+const DUMMY_USER = hashPassword(crypto.randomBytes(16).toString("hex"));
 
 function sameSecret(a: string, b: string): boolean {
   const ha = crypto.createHash("sha256").update(a).digest();
@@ -111,13 +126,39 @@ export function createApp(opts: AppOptions) {
     return undefined;
   };
 
-  const requireAdmin = (req: Request, _res: Response, next: NextFunction) => {
+  /** Who is logged in. The built-in "admin" login (ADMIN_PASSWORD) has no user record. */
+  const currentUser = (req: Request): { id: string | null; username: string; role: Role } => {
     pruneExpired();
     // Query token lets <img>/<video> tags in the admin UI load previews.
     const token = bearer(req, "Bearer") ?? (typeof req.query.token === "string" ? req.query.token : undefined);
-    if (!token || !db.sessions.some((s) => sameSecret(s.token, token))) {
-      throw new HttpError(401, "Not logged in");
+    const session = token ? db.sessions.find((s) => sameSecret(s.token, token)) : undefined;
+    if (!session) throw new HttpError(401, "Not logged in");
+    if (!session.userId) return { id: null, username: BUILTIN_ADMIN, role: "admin" };
+    const user = db.users.find((u) => u.id === session.userId);
+    if (!user) throw new HttpError(401, "Not logged in"); // account was deleted
+    return { id: user.id, username: user.username, role: user.role };
+  };
+
+  /** Any logged-in user may look; viewers may not change anything. */
+  const requireLogin = (req: Request, res: Response, next: NextFunction) => {
+    const user = currentUser(req);
+    if (user.role === "viewer" && req.method !== "GET" && req.method !== "HEAD") {
+      throw new HttpError(403, "Your account can only view, not make changes");
     }
+    res.locals.user = user;
+    next();
+  };
+
+  /** Logged in with any role, even for changes (log out, change own password). */
+  const requireSession = (req: Request, res: Response, next: NextFunction) => {
+    res.locals.user = currentUser(req);
+    next();
+  };
+
+  const requireAdminRole = (req: Request, res: Response, next: NextFunction) => {
+    const user = currentUser(req);
+    if (user.role !== "admin") throw new HttpError(403, "Only admins can manage user accounts");
+    res.locals.user = user;
     next();
   };
 
@@ -147,6 +188,11 @@ export function createApp(opts: AppOptions) {
       online: rest.lastSeen ? Date.now() - Date.parse(rest.lastSeen) < 2 * 60 * 1000 : false,
       nowShowing: refName(activeRef(assignmentOf(device))),
     };
+  };
+
+  const newPassword = (v: unknown): string => {
+    if (typeof v !== "string" || v.length < 8 || v.length > 200) throw new HttpError(400, "Passwords need at least 8 characters");
+    return v;
   };
 
   const color = (v: unknown, fallback: string): string => {
@@ -426,15 +472,82 @@ export function createApp(opts: AppOptions) {
 
   app.post("/api/login", route((req, res) => {
     const password = typeof req.body?.password === "string" ? req.body.password : "";
-    if (!sameSecret(password, opts.adminPassword)) throw new HttpError(401, "Wrong password");
+    const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+    let userId: string | null = null;
+    if (!username || username.toLowerCase() === BUILTIN_ADMIN) {
+      if (!sameSecret(password, opts.adminPassword)) throw new HttpError(401, "Wrong username or password");
+    } else {
+      const user = db.users.find((u) => u.username.toLowerCase() === username.toLowerCase());
+      // Hash even for unknown names so response time doesn't reveal which usernames exist.
+      const matches = checkPassword(user ?? DUMMY_USER, password);
+      if (!user || !matches) throw new HttpError(401, "Wrong username or password");
+      userId = user.id;
+    }
     pruneExpired();
     const token = secret();
-    db.sessions.push({ token, createdAt: now() });
+    db.sessions.push({ token, createdAt: now(), userId });
     store.save();
     res.json({ token });
   }));
 
-  app.post("/api/logout", requireAdmin, route((req, res) => {
+  app.get("/api/me", requireSession, route((_req, res) => res.json(res.locals.user)));
+
+  app.post("/api/me/password", requireSession, route((req, res) => {
+    const me = res.locals.user as { id: string | null };
+    if (!me.id) throw new HttpError(400, "The built-in admin password is set with ADMIN_PASSWORD when the server starts");
+    const user = findOr404(db.users, me.id, "User");
+    if (!checkPassword(user, typeof req.body?.current === "string" ? req.body.current : "")) {
+      throw new HttpError(400, "Current password is wrong");
+    }
+    Object.assign(user, hashPassword(newPassword(req.body?.password)));
+    store.save();
+    res.status(204).end();
+  }));
+
+  // ---------- user accounts (admins only) ----------
+
+  const publicUser = ({ passwordHash: _h, salt: _s, ...rest }: User) => rest;
+
+  const role = (v: unknown): Role => {
+    if (!ROLES.includes(v as Role)) throw new HttpError(400, `role must be one of: ${ROLES.join(", ")}`);
+    return v as Role;
+  };
+
+  app.get("/api/users", requireAdminRole, route((_req, res) => res.json(db.users.map(publicUser))));
+
+  app.post("/api/users", requireAdminRole, route((req, res) => {
+    const username = str(req.body?.username, "username", 50);
+    if (!/^[\w.@-]+$/.test(username)) throw new HttpError(400, "Usernames may use letters, numbers, . _ - and @");
+    if (username.toLowerCase() === BUILTIN_ADMIN || db.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
+      throw new HttpError(409, "That username is taken");
+    }
+    const user: User = { id: id(), username, role: role(req.body?.role ?? "editor"), ...hashPassword(newPassword(req.body?.password)), createdAt: now() };
+    db.users.push(user);
+    store.save();
+    res.status(201).json(publicUser(user));
+  }));
+
+  app.patch("/api/users/:id", requireAdminRole, route((req, res) => {
+    const user = findOr404(db.users, String(req.params.id), "User");
+    if (req.body?.role !== undefined) user.role = role(req.body.role);
+    if (req.body?.password !== undefined) {
+      Object.assign(user, hashPassword(newPassword(req.body.password)));
+      // A reset password logs the account out everywhere.
+      db.sessions = db.sessions.filter((s) => s.userId !== user.id);
+    }
+    store.save();
+    res.json(publicUser(user));
+  }));
+
+  app.delete("/api/users/:id", requireAdminRole, route((req, res) => {
+    const user = findOr404(db.users, String(req.params.id), "User");
+    db.users = db.users.filter((u) => u !== user);
+    db.sessions = db.sessions.filter((s) => s.userId !== user.id);
+    store.save();
+    res.status(204).end();
+  }));
+
+  app.post("/api/logout", requireSession, route((req, res) => {
     const token = bearer(req, "Bearer");
     db.sessions = db.sessions.filter((s) => s.token !== token);
     store.save();
@@ -454,11 +567,11 @@ export function createApp(opts: AppOptions) {
     },
   });
 
-  app.get("/api/media", requireAdmin, route((_req, res) => {
+  app.get("/api/media", requireLogin, route((_req, res) => {
     res.json([...db.media].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
   }));
 
-  app.post("/api/media", requireAdmin, upload.array("files", 50), route(async (req, res) => {
+  app.post("/api/media", requireLogin, upload.array("files", 50), route(async (req, res) => {
     const files = (req.files as Express.Multer.File[] | undefined) ?? [];
     if (!files.length) throw new HttpError(400, "No image or video files received");
     const created: Media[] = [];
@@ -480,14 +593,14 @@ export function createApp(opts: AppOptions) {
     res.status(201).json(created);
   }));
 
-  app.patch("/api/media/:id", requireAdmin, route((req, res) => {
+  app.patch("/api/media/:id", requireLogin, route((req, res) => {
     const m = findOr404(db.media, String(req.params.id), "Media");
     m.name = str(req.body?.name, "name");
     store.save();
     res.json(m);
   }));
 
-  app.delete("/api/media/:id", requireAdmin, route((req, res) => {
+  app.delete("/api/media/:id", requireLogin, route((req, res) => {
     const m = findOr404(db.media, String(req.params.id), "Media");
     db.media = db.media.filter((x) => x !== m);
     for (const p of db.playlists) {
@@ -500,16 +613,16 @@ export function createApp(opts: AppOptions) {
     res.status(204).end();
   }));
 
-  app.get("/api/media/:id/file", requireAdmin, route((req, res) => {
+  app.get("/api/media/:id/file", requireLogin, route((req, res) => {
     const m = findOr404(db.media, String(req.params.id), "Media");
     res.type(m.mime).sendFile(path.join(mediaDir, m.filename));
   }));
 
   // ---------- playlists ----------
 
-  app.get("/api/playlists", requireAdmin, route((_req, res) => res.json(db.playlists)));
+  app.get("/api/playlists", requireLogin, route((_req, res) => res.json(db.playlists)));
 
-  app.post("/api/playlists", requireAdmin, route((req, res) => {
+  app.post("/api/playlists", requireLogin, route((req, res) => {
     const p: Playlist = {
       id: id(),
       name: str(req.body?.name, "name"),
@@ -521,7 +634,7 @@ export function createApp(opts: AppOptions) {
     res.status(201).json(p);
   }));
 
-  app.put("/api/playlists/:id", requireAdmin, route((req, res) => {
+  app.put("/api/playlists/:id", requireLogin, route((req, res) => {
     const p = findOr404(db.playlists, String(req.params.id), "Playlist");
     if (req.body?.name !== undefined) p.name = str(req.body.name, "name");
     if (req.body?.items !== undefined) p.items = parseItems(req.body.items);
@@ -530,7 +643,7 @@ export function createApp(opts: AppOptions) {
     res.json(p);
   }));
 
-  app.delete("/api/playlists/:id", requireAdmin, route((req, res) => {
+  app.delete("/api/playlists/:id", requireLogin, route((req, res) => {
     const p = findOr404(db.playlists, String(req.params.id), "Playlist");
     db.playlists = db.playlists.filter((x) => x !== p);
     for (const a of assignments()) {
@@ -544,9 +657,9 @@ export function createApp(opts: AppOptions) {
 
   // ---------- layouts ----------
 
-  app.get("/api/layouts", requireAdmin, route((_req, res) => res.json(db.layouts)));
+  app.get("/api/layouts", requireLogin, route((_req, res) => res.json(db.layouts)));
 
-  app.post("/api/layouts", requireAdmin, route((req, res) => {
+  app.post("/api/layouts", requireLogin, route((req, res) => {
     const l: Layout = {
       id: id(),
       name: str(req.body?.name, "name"),
@@ -560,7 +673,7 @@ export function createApp(opts: AppOptions) {
     res.status(201).json(l);
   }));
 
-  app.put("/api/layouts/:id", requireAdmin, route((req, res) => {
+  app.put("/api/layouts/:id", requireLogin, route((req, res) => {
     const l = findOr404(db.layouts, String(req.params.id), "Layout");
     if (req.body?.name !== undefined) l.name = str(req.body.name, "name");
     if (req.body?.zones !== undefined) l.zones = parseZones(req.body.zones);
@@ -569,7 +682,7 @@ export function createApp(opts: AppOptions) {
     res.json(l);
   }));
 
-  app.delete("/api/layouts/:id", requireAdmin, route((req, res) => {
+  app.delete("/api/layouts/:id", requireLogin, route((req, res) => {
     const l = findOr404(db.layouts, String(req.params.id), "Layout");
     db.layouts = db.layouts.filter((x) => x !== l);
     for (const a of assignments()) {
@@ -582,9 +695,9 @@ export function createApp(opts: AppOptions) {
 
   // ---------- screen groups ----------
 
-  app.get("/api/groups", requireAdmin, route((_req, res) => res.json(db.groups)));
+  app.get("/api/groups", requireLogin, route((_req, res) => res.json(db.groups)));
 
-  app.post("/api/groups", requireAdmin, route((req, res) => {
+  app.post("/api/groups", requireLogin, route((req, res) => {
     const g: Group = { id: id(), name: str(req.body?.name, "name"), playlistId: null, layoutId: null, schedule: [], createdAt: now() };
     applyContent(g, req.body);
     db.groups.push(g);
@@ -592,7 +705,7 @@ export function createApp(opts: AppOptions) {
     res.status(201).json(g);
   }));
 
-  app.patch("/api/groups/:id", requireAdmin, route((req, res) => {
+  app.patch("/api/groups/:id", requireLogin, route((req, res) => {
     const g = findOr404(db.groups, String(req.params.id), "Group");
     if (req.body?.name !== undefined) g.name = str(req.body.name, "name");
     applyContent(g, req.body);
@@ -600,7 +713,7 @@ export function createApp(opts: AppOptions) {
     res.json(g);
   }));
 
-  app.delete("/api/groups/:id", requireAdmin, route((req, res) => {
+  app.delete("/api/groups/:id", requireLogin, route((req, res) => {
     const g = findOr404(db.groups, String(req.params.id), "Group");
     db.groups = db.groups.filter((x) => x !== g);
     // Screens leave the group and go back to their own content.
@@ -611,11 +724,11 @@ export function createApp(opts: AppOptions) {
 
   // ---------- devices (admin side) ----------
 
-  app.get("/api/devices", requireAdmin, route((_req, res) => {
+  app.get("/api/devices", requireLogin, route((_req, res) => {
     res.json(db.devices.map(publicDevice));
   }));
 
-  app.post("/api/devices/pair", requireAdmin, route((req, res) => {
+  app.post("/api/devices/pair", requireLogin, route((req, res) => {
     pruneExpired();
     const code = str(req.body?.code, "code", 20).toUpperCase().replace(/[^A-Z0-9]/g, "");
     const pairing = db.pairings.find((p) => p.code === code && !p.deviceId);
@@ -643,7 +756,7 @@ export function createApp(opts: AppOptions) {
     res.status(201).json(publicDevice(device));
   }));
 
-  app.patch("/api/devices/:id", requireAdmin, route((req, res) => {
+  app.patch("/api/devices/:id", requireLogin, route((req, res) => {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     if (req.body?.name !== undefined) d.name = str(req.body.name, "name");
     applyContent(d, req.body);
@@ -652,7 +765,7 @@ export function createApp(opts: AppOptions) {
     res.json(publicDevice(d));
   }));
 
-  app.delete("/api/devices/:id", requireAdmin, route((req, res) => {
+  app.delete("/api/devices/:id", requireLogin, route((req, res) => {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     db.devices = db.devices.filter((x) => x !== d);
     fs.rmSync(screenshotFile(d.id), { force: true });
@@ -660,14 +773,14 @@ export function createApp(opts: AppOptions) {
     res.status(204).end();
   }));
 
-  app.post("/api/devices/:id/commands", requireAdmin, route((req, res) => {
+  app.post("/api/devices/:id/commands", requireLogin, route((req, res) => {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     queueCommand(d, commandType(req.body?.type));
     store.save();
     res.status(202).json(publicDevice(d));
   }));
 
-  app.post("/api/groups/:id/commands", requireAdmin, route((req, res) => {
+  app.post("/api/groups/:id/commands", requireLogin, route((req, res) => {
     const g = findOr404(db.groups, String(req.params.id), "Group");
     const type = commandType(req.body?.type);
     const members = db.devices.filter((d) => d.groupId === g.id);
@@ -676,7 +789,7 @@ export function createApp(opts: AppOptions) {
     res.status(202).json({ screens: members.length });
   }));
 
-  app.get("/api/devices/:id/screenshot", requireAdmin, route((req, res) => {
+  app.get("/api/devices/:id/screenshot", requireLogin, route((req, res) => {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     if (!d.screenshotAt || !fs.existsSync(screenshotFile(d.id))) throw new HttpError(404, "No screenshot yet");
     res.set("cache-control", "no-store").type("image/jpeg").sendFile(screenshotFile(d.id));
