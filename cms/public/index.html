@@ -26,6 +26,7 @@
         <button data-tab="playlists">Playlists</button>
         <button data-tab="layouts">Layouts</button>
         <button data-tab="devices">Screens</button>
+        <button data-tab="reports">Reports</button>
         <button data-tab="users" class="admin-only">Users</button>
       </nav>
       <button id="account" class="ghost small" title="Your account"></button>
@@ -81,6 +82,10 @@
           <div class="card span-2">
             <div class="card-head"><h2>Recent activity</h2></div>
             <ul id="event-list" class="timeline"></ul>
+          </div>
+          <div class="card span-2">
+            <div class="card-head"><h2>Most played</h2><span class="muted small-text">Showings in the last 7 days, all screens</span></div>
+            <div id="most-played"></div>
           </div>
         </div>
         <div id="viz-tip" class="viz-tip" hidden></div>
@@ -141,6 +146,41 @@
           </aside>
           <div id="layout-editor" class="card">
             <p class="muted">Pick or create a layout.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-reports" class="tab viz-root" hidden>
+        <div class="dash-head report-head">
+          <div>
+            <h1>Proof of play</h1>
+            <p class="muted small-text">How many times each piece of content was shown, and for how long, on each screen. Screens count while offline and send it when they're back.</p>
+          </div>
+          <div class="inline wrap">
+            <select id="report-days">
+              <option value="1">Today</option>
+              <option value="7" selected>Last 7 days</option>
+              <option value="30">Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="365">Last 12 months</option>
+            </select>
+            <select id="report-screen"><option value="">All screens</option></select>
+            <button id="report-csv" class="ghost" type="button">Download CSV</button>
+          </div>
+        </div>
+        <div class="dash-grid">
+          <div id="report-stats" class="stats span-4 four"></div>
+          <div class="card span-4">
+            <div class="card-head"><h2>Showings per day</h2></div>
+            <div id="report-daily"></div>
+          </div>
+          <div class="card span-4">
+            <div class="card-head"><h2>By content</h2><span class="muted small-text">Click a row to see it per screen</span></div>
+            <div id="report-content"></div>
+          </div>
+          <div class="card span-4">
+            <div class="card-head"><h2>By screen</h2></div>
+            <div id="report-screens"></div>
           </div>
         </div>
       </section>

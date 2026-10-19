@@ -22,7 +22,7 @@ function h(tag, attrs = {}, ...children) {
     else if (k in el && typeof v !== "string") el[k] = v;
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of children.flat()) if (c != null && c !== false) el.append(c);
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) el.append(c);
   return el;
 }
 
@@ -99,6 +99,7 @@ document.querySelectorAll("header nav button").forEach((btn) =>
     document.querySelectorAll(".tab").forEach((t) => (t.hidden = t.id !== `tab-${btn.dataset.tab}`));
     if (btn.dataset.tab === "devices") loadDevices();
     if (btn.dataset.tab === "dashboard") loadDashboard();
+    if (btn.dataset.tab === "reports") loadReports();
   }),
 );
 
@@ -267,11 +268,107 @@ function renderDashboard(d) {
     : [h("li", { class: "muted" }, "Screens going offline and coming back will show up here.")]));
 }
 
+// ---------- proof-of-play reports ----------
+
+async function loadReports() {
+  const days = $("#report-days").value;
+  const screen = $("#report-screen");
+  const deviceId = screen.value;
+  const r = await api("GET", `/api/reports?days=${days}${deviceId ? `&deviceId=${encodeURIComponent(deviceId)}` : ""}`);
+  screen.replaceChildren(h("option", { value: "" }, "All screens"),
+    state.devices.map((x) => h("option", { value: x.id, selected: x.id === deviceId }, x.name)));
+  renderReports(r);
+}
+
+function renderReports(r) {
+  const tile = (label, value, note) => h("div", { class: "stat card" },
+    h("div", { class: "stat-label" }, label), h("div", { class: "stat-value" }, value), note ? h("div", { class: "small-text muted" }, note) : null);
+  const period = r.from === r.to ? fmtDay(r.from + "T12:00:00") : `${fmtDay(r.from + "T12:00:00")} – ${fmtDay(r.to + "T12:00:00")}`;
+  $("#report-stats").replaceChildren(
+    tile("Showings", fmtCount(r.totals.plays), period),
+    tile("Time on screen", fmtDuration(r.totals.seconds), "All zones added together"),
+    tile("Content shown", fmtCount(r.totals.content), "Different items"),
+    tile("Screens reporting", fmtCount(r.totals.screens), `of ${state.devices.length}`),
+  );
+
+  const maxDay = Math.max(1, ...r.daily.map((x) => x.plays));
+  const step = niceStep(maxDay);
+  const label = (i) => new Date(r.daily[i].day + "T12:00:00").toLocaleDateString([], r.days <= 7 ? { weekday: "short" } : { day: "numeric", month: "short" });
+  const every = Math.max(1, Math.ceil(r.days / 10));
+  $("#report-daily").replaceChildren(r.totals.plays
+    ? columnChart({
+        values: r.daily.map((x) => x.plays), max: Math.ceil(maxDay / step) * step,
+        ticks: Array.from({ length: Math.ceil(maxDay / step) + 1 }, (_, i) => i * step), label: (t) => fmtCount(t),
+        tip: (i, v) => `${fmtDay(r.daily[i].day + "T12:00:00")}: ${fmtCount(v)} showings, ${fmtDuration(r.daily[i].seconds)} on screen`,
+        xLabels: r.daily.map((_, i) => [i, label(i)]).filter(([i]) => i % every === 0 || i === r.days - 1),
+        width: Math.max(300, $("#report-daily").clientWidth || 640), height: 200,
+      })
+    : h("p", { class: "muted" }, "Nothing reported for this period yet. Screens need player version 1.5.0 or newer."));
+
+  const kindLabel = { image: "Image", video: "Video", text: "Text", web: "Web", youtube: "YouTube", stream: "Live stream", html: "Widget" };
+  const screensFor = (key) => Object.entries(r.matrix).filter(([k]) => k.startsWith(key + "|"))
+    .map(([k, n]) => ({ name: state.devices.find((x) => x.id === k.split("|")[1])?.name ?? "Removed screen", n }))
+    .sort((a, b) => b.n - a.n);
+  const maxPlays = Math.max(1, ...r.byContent.map((c) => c.plays));
+  $("#report-content").replaceChildren(r.byContent.length
+    ? h("div", { class: "rtable" },
+        h("div", { class: "rrow rhead" }, ["Content", "Type", "Showings", "Time on screen", "Screens"].map((t) => h("span", {}, t))),
+        r.byContent.map((c) => {
+          const detail = h("div", { class: "rdetail", hidden: state.reportFocus !== c.key },
+            barList(screensFor(c.key).map((x) => ({ label: x.name, n: x.n })), { unit: "" }));
+          const row = h("div", { class: `rrow${state.reportFocus === c.key ? " focus" : ""}`, role: "button", tabindex: 0,
+            onclick: () => { detail.hidden = !detail.hidden; } },
+            h("span", { class: "rname" }, h("strong", { class: c.deleted ? "muted" : "" }, c.label)),
+            h("span", { class: "muted" }, kindLabel[c.kind] ?? c.kind ?? ""),
+            h("span", { class: "rbar" }, h("span", { class: "bartrack" }, h("span", { class: "barfill", style: `width:${Math.max(2, (c.plays / maxPlays) * 100)}%` })),
+              h("span", { class: "num" }, fmtCount(c.plays))),
+            h("span", { class: "num" }, fmtDuration(c.seconds)),
+            h("span", { class: "num" }, c.screens));
+          return [row, detail];
+        }))
+    : h("p", { class: "muted" }, "Nothing reported for this period."));
+  if (state.reportFocus) {
+    $("#report-content .rrow.focus")?.scrollIntoView({ block: "center" });
+    state.reportFocus = null;
+  }
+
+  $("#report-screens").replaceChildren(r.byScreen.length
+    ? h("div", { class: "rtable" },
+        h("div", { class: "rrow rhead" }, ["Screen", "Content items", "Showings", "Time on screen", ""].map((t) => h("span", {}, t))),
+        r.byScreen.map((x) => h("div", { class: "rrow" },
+          h("span", { class: "rname" }, h("strong", {}, x.name)),
+          h("span", { class: "num" }, x.content),
+          h("span", { class: "num" }, fmtCount(x.plays)),
+          h("span", { class: "num" }, fmtDuration(x.seconds)),
+          h("span", {}, h("button", { class: "ghost small", onclick: () => { $("#report-screen").value = x.deviceId; loadReports(); } }, "Only this screen")))))
+    : h("p", { class: "muted" }, "No screens have reported for this period."));
+}
+
+/** A round step for a y-axis that goes up to max in about four steps: 1, 2, 5, 10, 20, 50… */
+function niceStep(max) {
+  const raw = max / 4;
+  const p = 10 ** Math.floor(Math.log10(Math.max(raw, 1)));
+  return [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? p * 10;
+}
+
+$("#report-days").addEventListener("change", () => loadReports().catch((err) => toast(err.message)));
+$("#report-screen").addEventListener("change", () => loadReports().catch((err) => toast(err.message)));
+$("#report-csv").addEventListener("click", async () => {
+  try {
+    const res = await fetch(`/api/reports.csv?days=${$("#report-days").value}`, { headers: { authorization: `Bearer ${state.token}` } });
+    if (!res.ok) throw new Error("Couldn't make the CSV");
+    const name = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "proof-of-play.csv";
+    const url = URL.createObjectURL(await res.blob());
+    h("a", { href: url, download: name }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (err) { toast(err.message); }
+});
+
 // One tooltip for every chart mark: anything with data-tip shows it on hover.
 document.addEventListener("pointermove", (e) => {
   const tip = $("#viz-tip");
   const el = e.target.closest?.("[data-tip]");
-  if (!el || $("#tab-dashboard").hidden) { tip.hidden = true; return; }
+  if (!el || ($("#tab-dashboard").hidden && $("#tab-reports").hidden)) { tip.hidden = true; return; }
   tip.textContent = el.getAttribute("data-tip");
   tip.hidden = false;
   const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
@@ -280,8 +377,10 @@ document.addEventListener("pointermove", (e) => {
 });
 
 async function loadDashboard() {
-  const d = await api("GET", "/api/dashboard");
+  const [d, plays] = await Promise.all([api("GET", "/api/dashboard"), api("GET", "/api/reports?days=7").catch(() => null)]);
   renderDashboard(d);
+  $("#most-played").replaceChildren(barList((plays?.byContent ?? []).slice(0, 6).map((c) => ({ label: c.label, n: c.plays })),
+    { empty: "Screens on player 1.5.0 or newer report what they show. Nothing yet." }));
   if (state.me?.role === "admin") {
     const s = await api("GET", "/api/settings");
     const f = $("#alert-settings");
@@ -312,9 +411,19 @@ $("#test-alert").addEventListener("click", async () => {
 // ---------- media ----------
 
 async function loadMedia() {
-  state.media = await api("GET", "/api/media");
+  const [media, report] = await Promise.all([api("GET", "/api/media"), api("GET", "/api/reports?days=7").catch(() => null)]);
+  state.media = media;
+  state.mediaPlays = Object.fromEntries((report?.byContent ?? []).filter((c) => c.mediaId).map((c) => [c.mediaId, c]));
   renderMedia();
 }
+
+/** "2 h 05 m", "4 m 30 s", "45 s" */
+const fmtDuration = (sec) => {
+  if (sec >= 3600) return `${Math.floor(sec / 3600)} h ${String(Math.floor((sec % 3600) / 60)).padStart(2, "0")} m`;
+  if (sec >= 60) return `${Math.floor(sec / 60)} m ${String(sec % 60).padStart(2, "0")} s`;
+  return `${sec} s`;
+};
+const fmtCount = (n) => n.toLocaleString();
 
 function renderMedia() {
   const grid = $("#media-grid");
@@ -327,6 +436,7 @@ function renderMedia() {
         h("div", { class: "name", title: m.name }, m.name),
         h("div", { class: "muted" }, fmtSize(m.size), m.video ? ` · ${m.video.width}×${m.video.height}` : ""),
         m.type === "video" ? videoBadge(m) : null,
+        playLine(state.mediaPlays?.[m.id]),
         h("div", { class: "actions" },
           h("button", { class: "ghost small", onclick: () => renameMedia(m) }, "Rename"),
           h("button", { class: "danger small", onclick: () => deleteMedia(m) }, "Delete"),
@@ -334,6 +444,18 @@ function renderMedia() {
       ),
     ));
   }
+}
+
+/** "▶ 120 showings · 1 h 10 m · 3 screens · last 7 days" under a media tile. */
+function playLine(p) {
+  if (!p) return h("div", { class: "small-text muted" }, "Not shown in the last 7 days");
+  return h("button", { class: "playline small-text", title: "Open in Reports", onclick: () => openReportFor(p.key) },
+    `▶ ${fmtCount(p.plays)} showing${p.plays === 1 ? "" : "s"} · ${fmtDuration(p.seconds)} · ${p.screens} screen${p.screens === 1 ? "" : "s"} · 7 days`);
+}
+
+function openReportFor(key) {
+  state.reportFocus = key;
+  document.querySelector('header nav button[data-tab="reports"]').click();
 }
 
 /** Whether a video is ready for TVs: most TVs only manage H.264 at 1080p, so bigger videos get a converted copy. */
@@ -476,7 +598,7 @@ function renderEditor() {
         const url = prompt("YouTube link: a video, playlist or live stream", "https://www.youtube.com/watch?v=");
         if (!url || /v=$/.test(url)) return;
         if (!isYoutube(url)) { toast("That isn't a YouTube link. Use \"+ Web page\" for other sites."); return; }
-        d.items.push({ kind: "web", url, sound: false, duration: 60 });
+        d.items.push({ kind: "web", url, sound: true, duration: 60 });
         touch();
       } }, "+ YouTube"),
       h("button", { class: "ghost", onclick: () => {
@@ -810,8 +932,8 @@ function zoneSource(z) {
 function newZoneItem(source, z) {
   const base = { duration: 30, color: "#ffffff", background: "#111827" };
   switch (source) {
-    case "youtube": return { ...base, kind: "web", url: "", sound: false };
-    case "channel": return { ...base, kind: "web", url: channelUrl(Object.values(NEWS_CHANNELS)[0]), sound: false };
+    case "youtube": return { ...base, kind: "web", url: "", sound: true };
+    case "channel": return { ...base, kind: "web", url: channelUrl(Object.values(NEWS_CHANNELS)[0]), sound: true };
     case "x": return { ...base, kind: "x", handle: "", background: "#000000" };
     case "feed": return { ...base, kind: "feed", url: googleNewsUrl("US:en", "", ""), mode: z.h <= 20 ? "ticker" : "list", title: "Top stories" };
     case "clock": return { ...base, kind: "clock", clocks: defaultClocks(), hour24: true };
@@ -1012,7 +1134,7 @@ function openTemplateSetup(t) {
   const main = h("select", {}, h("option", { value: "" }, "A new empty playlist (fill it later)"),
     state.playlists.map((p) => h("option", { value: p.id }, p.name)));
   const youtube = h("input", { type: "url", placeholder: "https://www.youtube.com/watch?v=… (video, playlist or live)", class: "grow" });
-  const sound = h("input", { type: "checkbox" });
+  const sound = h("input", { type: "checkbox", checked: true });
   const clockBox = h("div");
   const drawClocks = () => clockBox.replaceChildren(clockFields(clocks, () => {}, drawClocks));
   drawClocks();
@@ -1144,6 +1266,7 @@ function connectLive() {
       if (!$("#tab-devices").hidden || $("#dialog").open) loadDevices().catch(() => {});
       if (!$("#tab-dashboard").hidden) loadDashboard().catch(() => {});
       if (!$("#tab-media").hidden) loadMedia().catch(() => {});
+      if (!$("#tab-reports").hidden) loadReports().catch(() => {});
     }, 250);
   };
 }

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import {
-  COMMAND_TYPES, ROLES, Store, type CommandType, type Device, type Group, type Role, type ScreenEvent, type User, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
+  COMMAND_TYPES, ROLES, Store, type CommandType, type Device, type Group, type PlayStat, type Role, type ScreenEvent, type User, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
 } from "./store.js";
 import { TEMPLATES } from "./templates.js";
 import { convertForScreens, findFfmpeg, probeVideo } from "./video.js";
@@ -283,7 +283,8 @@ export function createApp(opts: AppOptions) {
             scroll: Boolean(it?.scroll),
           };
         case "web":
-          return { ...base, kind, url: httpUrl(it?.url, "items[].url"), sound: Boolean(it?.sound) };
+          // YouTube plays with sound unless switched off.
+          return { ...base, kind, url: httpUrl(it?.url, "items[].url"), sound: it?.sound !== false };
         case "stream":
           return { ...base, kind, url: httpUrl(it?.url, "items[].url") };
         case "clock":
@@ -932,7 +933,7 @@ export function createApp(opts: AppOptions) {
           z.fill === "clock" ? { ...base, kind: "clock", clocks, hour24: b.hour24 !== false, ...colors }
           : z.fill === "news-ticker" ? { ...base, kind: "feed", url: feedUrl, mode: "ticker", title: feedTitle, ...colors }
           : z.fill === "news-list" ? { ...base, kind: "feed", url: feedUrl, mode: "list", title: feedTitle || "Headlines", ...colors }
-          : { ...base, kind: "web", url: youtubeUrl, sound: !!b.youtubeSound };
+          : { ...base, kind: "web", url: youtubeUrl, sound: b.youtubeSound !== false };
         return { ...zone, item };
       }
       let playlist = mainPlaylist;
@@ -1471,6 +1472,113 @@ export function createApp(opts: AppOptions) {
     store.saveSoon();
     notifyChange();
     res.status(204).end();
+  }));
+
+  // ---------- proof of play ----------
+
+  const PLAY_KEEP_DAYS = 400;
+  const localDay = (t: number) => {
+    const d = new Date(t);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  /** Players send hourly counts of showings and seconds per item; they're kept as daily totals. */
+  app.post("/api/player/plays", requireDevice, route((req, res) => {
+    const device = res.locals.device as Device;
+    const rows = Array.isArray(req.body?.plays) ? req.body.plays.slice(0, 5000) : [];
+    for (const r of rows) {
+      const plays = Math.max(0, Math.min(100_000, Math.round(Number(r?.plays) || 0)));
+      const seconds = Math.max(0, Math.min(86_400 * 31, Math.round(Number(r?.seconds) || 0)));
+      const at = Number(r?.at);
+      if ((!plays && !seconds) || !Number.isFinite(at) || typeof r?.itemId !== "string") continue;
+      const mediaId = typeof r?.mediaId === "string" && r.mediaId ? r.mediaId.slice(0, 60) : null;
+      const contentKey = mediaId ?? r.itemId.slice(0, 60);
+      const day = localDay(Math.min(at, Date.now()));
+      const kind = typeof r?.kind === "string" ? r.kind.slice(0, 20) : "";
+      let stat = db.playStats.find((s) => s.day === day && s.deviceId === device.id && s.contentKey === contentKey);
+      if (!stat) db.playStats.push(stat = { day, deviceId: device.id, contentKey, kind, plays: 0, seconds: 0 });
+      stat.plays += plays;
+      stat.seconds += seconds;
+    }
+    const oldest = localDay(Date.now() - PLAY_KEEP_DAYS * 86_400_000);
+    db.playStats = db.playStats.filter((s) => s.day >= oldest);
+    store.saveSoon();
+    res.status(204).end();
+  }));
+
+  /** Name and kind of a content key: a media file, or a playlist/zone item. Survives deleted items with a fallback. */
+  const contentInfo = (key: string, kind: string) => {
+    const m = db.media.find((x) => x.id === key);
+    if (m) return { label: m.name, kind: m.type, mediaId: m.id, deleted: false };
+    const label = itemLabel(key);
+    return { label: label ?? `Removed ${kind || "item"}`, kind, mediaId: null, deleted: !label };
+  };
+
+  /** Plays and screen time over a period, by content, by screen and by day. */
+  const playReport = (days: number, deviceId: string | null) => {
+    const from = localDay(Date.now() - (days - 1) * 86_400_000);
+    const rows = db.playStats.filter((s) => s.day >= from && (!deviceId || s.deviceId === deviceId));
+    const sum = <K>(keyOf: (s: PlayStat) => K) => {
+      const out = new Map<K, { plays: number; seconds: number; screens: Set<string> }>();
+      for (const s of rows) {
+        const k = keyOf(s);
+        const v = out.get(k) ?? { plays: 0, seconds: 0, screens: new Set<string>() };
+        v.plays += s.plays;
+        v.seconds += s.seconds;
+        v.screens.add(s.deviceId);
+        out.set(k, v);
+      }
+      return out;
+    };
+    const kinds = new Map(rows.map((s) => [s.contentKey, s.kind]));
+    const byContent = [...sum((s) => s.contentKey)].map(([key, v]) => ({
+      key, ...contentInfo(key, kinds.get(key) ?? ""), plays: v.plays, seconds: v.seconds, screens: v.screens.size,
+    })).sort((a, b) => b.plays - a.plays || b.seconds - a.seconds);
+    const byScreen = [...sum((s) => s.deviceId)].map(([id, v]) => ({
+      deviceId: id, name: db.devices.find((d) => d.id === id)?.name ?? "Removed screen", plays: v.plays, seconds: v.seconds, content: 0,
+    })).sort((a, b) => b.plays - a.plays);
+    for (const s of byScreen) s.content = new Set(rows.filter((r) => r.deviceId === s.deviceId).map((r) => r.contentKey)).size;
+    const daily = Array.from({ length: days }, (_, i) => {
+      const day = localDay(Date.now() - (days - 1 - i) * 86_400_000);
+      const d = rows.filter((s) => s.day === day);
+      return { day, plays: d.reduce((n, s) => n + s.plays, 0), seconds: d.reduce((n, s) => n + s.seconds, 0) };
+    });
+    // Which content ran on which screen: the top content against every screen that showed it.
+    const pairs = rows.reduce((m, s) => {
+      const k = `${s.contentKey}|${s.deviceId}`;
+      m.set(k, (m.get(k) ?? 0) + s.plays);
+      return m;
+    }, new Map<string, number>());
+    return {
+      from, to: localDay(Date.now()), days,
+      totals: { plays: rows.reduce((n, s) => n + s.plays, 0), seconds: rows.reduce((n, s) => n + s.seconds, 0), content: byContent.length, screens: byScreen.length },
+      byContent, byScreen, daily,
+      matrix: Object.fromEntries(pairs),
+    };
+  };
+
+  const reportDays = (v: unknown) => {
+    const n = Number(v ?? 7);
+    if (!Number.isInteger(n) || n < 1 || n > 366) throw new HttpError(400, "days must be 1-366");
+    return n;
+  };
+
+  app.get("/api/reports", requireLogin, route((req, res) => {
+    const deviceId = typeof req.query.deviceId === "string" && req.query.deviceId ? req.query.deviceId : null;
+    res.json(playReport(reportDays(req.query.days), deviceId));
+  }));
+
+  /** A spreadsheet of the same data: one row per day, screen and content. */
+  app.get("/api/reports.csv", requireLogin, route((req, res) => {
+    const days = reportDays(req.query.days);
+    const from = localDay(Date.now() - (days - 1) * 86_400_000);
+    const cell = (v: string | number) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+    const lines = [["Date", "Screen", "Content", "Type", "Plays", "Seconds on screen"].join(",")];
+    for (const s of db.playStats.filter((x) => x.day >= from).sort((a, b) => a.day.localeCompare(b.day))) {
+      const c = contentInfo(s.contentKey, s.kind);
+      lines.push([s.day, db.devices.find((d) => d.id === s.deviceId)?.name ?? "Removed screen", c.label, c.kind, s.plays, s.seconds].map(cell).join(","));
+    }
+    res.type("text/csv").set("content-disposition", `attachment; filename="proof-of-play-${from}-to-${localDay(Date.now())}.csv"`).send(lines.join("\r\n") + "\r\n");
   }));
 
   /** Server-sent events for the admin page: "change" whenever anything is saved or a screen reports in. */

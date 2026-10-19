@@ -28,6 +28,11 @@ class Prefs(context: Context) {
         get() = sp.getString("videoMode", null) ?: VideoView.MODE_SURFACE
         set(v) = sp.edit().putString("videoMode", v).apply()
 
+    /** Asked once for the "draw over other apps" permission that auto-start needs on Android 10+. */
+    var askedOverlay: Boolean
+        get() = sp.getBoolean("askedOverlay", false)
+        set(v) = sp.edit().putBoolean("askedOverlay", v).apply()
+
     fun unpair() {
         sp.edit().remove("deviceToken").remove("deviceName").remove("manifest").apply()
     }

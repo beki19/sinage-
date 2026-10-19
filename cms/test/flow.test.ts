@@ -562,3 +562,51 @@ test("live: a screen's wait call answers as soon as its content changes, and its
   const bad = await fetch(base + "/api/playlists", { method: "POST", headers: { authorization: admin, "content-type": "application/json" }, body: "{nope" });
   assert.equal(bad.status, 400);
 });
+
+test("proof of play: counts from screens add up by content, screen and day, and export as CSV", async () => {
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  const form = new FormData();
+  form.append("files", new Blob([png], { type: "image/png" }), "poster.png");
+  const [media] = await (await fetch(base + "/api/media", { method: "POST", headers: { authorization: admin }, body: form })).json();
+  const pl = (await api("POST", "/api/playlists", { name: "PoP", items: [{ kind: "media", mediaId: media.id }, { kind: "text", text: "Sale, today only" }] }, admin)).json;
+  const one = await pairScreen("PoP TV 1", { playlistId: pl.id });
+  const two = await pairScreen("PoP TV 2", { playlistId: pl.id });
+  const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  const imageItem = pl.items[0], textItem = pl.items[1];
+
+  assert.equal((await api("POST", "/api/player/plays", { plays: [
+    { itemId: imageItem.id, kind: "image", mediaId: media.id, at: hour, plays: 10, seconds: 100 },
+    { itemId: textItem.id, kind: "text", at: hour, plays: 4, seconds: 40 },
+  ] }, one.auth)).status, 204);
+  await api("POST", "/api/player/plays", { plays: [{ itemId: imageItem.id, kind: "image", mediaId: media.id, at: hour, plays: 5, seconds: 50 }] }, two.auth);
+  // A second batch for the same hour adds up rather than replacing.
+  await api("POST", "/api/player/plays", { plays: [{ itemId: imageItem.id, kind: "image", mediaId: media.id, at: hour, plays: 1, seconds: 10 }] }, two.auth);
+  assert.equal((await api("POST", "/api/player/plays", { plays: [] })).status, 401);
+
+  const r = (await api("GET", "/api/reports?days=7", undefined, admin)).json;
+  const poster = r.byContent.find((c: { key: string }) => c.key === media.id);
+  assert.deepEqual([poster.label, poster.kind, poster.plays, poster.seconds, poster.screens], ["poster.png", "image", 16, 160, 2]);
+  const text = r.byContent.find((c: { key: string }) => c.key === textItem.id);
+  assert.equal(text.label, '"Sale, today only"');
+  assert.equal(r.daily.length, 7);
+  assert.ok(r.daily[6].plays >= 20);
+  assert.equal(r.matrix[`${media.id}|${two.id}`], 6);
+  const forOne = (await api("GET", `/api/reports?days=1&deviceId=${one.id}`, undefined, admin)).json;
+  assert.equal(forOne.byContent.find((c: { key: string }) => c.key === media.id).plays, 10);
+  assert.equal((await api("GET", "/api/reports?days=0", undefined, admin)).status, 400);
+
+  const csv = await fetch(base + "/api/reports.csv?days=7", { headers: { authorization: admin } });
+  assert.match(csv.headers.get("content-type") ?? "", /text\/csv/);
+  const body = await csv.text();
+  assert.match(body, /^Date,Screen,Content,Type,Plays,Seconds on screen\r\n/);
+  assert.match(body, /PoP TV 2,poster\.png,image,6,60/);
+  assert.match(body, /"""Sale, today only"""/, "commas and quotes are escaped");
+});
+
+test("YouTube plays with sound unless it's switched off", async () => {
+  const pl = (await api("POST", "/api/playlists", { name: "YT sound", items: [
+    { kind: "web", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+    { kind: "web", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", sound: false },
+  ] }, admin)).json;
+  assert.deepEqual(pl.items.map((i: { sound: boolean }) => i.sound), [true, false]);
+});

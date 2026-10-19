@@ -238,12 +238,29 @@ export interface Data {
   sessions: Session[];
   settings: Settings;
   events: ScreenEvent[];
+  /** Proof of play, one row per day, screen and content. */
+  playStats: PlayStat[];
+  /** One-off data upgrades already applied. */
+  migrations: string[];
+}
+
+export interface PlayStat {
+  /** Local date on the CMS computer, "2026-10-19" */
+  day: string;
+  deviceId: string;
+  /** The media id for images and videos (so the same file counts together in every playlist), otherwise the item id. */
+  contentKey: string;
+  kind: string;
+  plays: number;
+  seconds: number;
 }
 
 const empty = (): Data => ({
   media: [], playlists: [], layouts: [], devices: [], groups: [], pairings: [], users: [], sessions: [],
   settings: { alertWebhookUrl: "", offlineAfterMinutes: 5 },
   events: [],
+  playStats: [],
+  migrations: [],
 });
 
 /** Small JSON-file database. Fine for hundreds of screens; swap for SQL beyond that. */
@@ -269,6 +286,12 @@ export class Store {
       d.alertState ??= null;
     }
     this.data.settings = { ...empty().settings, ...this.data.settings };
+    // YouTube used to start muted unless "Play with sound" was ticked; sound is now the default.
+    if (!this.data.migrations.includes("youtube-sound-on")) {
+      const items = [...this.data.playlists.flatMap((p) => p.items), ...this.data.layouts.flatMap((l) => l.zones.flatMap((z) => (z.item ? [z.item] : [])))];
+      for (const it of items) if (it.kind === "web") it.sound = true;
+      this.data.migrations.push("youtube-sound-on");
+    }
   }
 
   private timer: NodeJS.Timeout | null = null;

@@ -4,7 +4,9 @@ import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -49,6 +51,10 @@ import kotlin.coroutines.resumeWithException
  * setup (enter server address) -> pairing (show code) -> playback (loop playlist).
  */
 class MainActivity : AppCompatActivity(), ZoneHost {
+    private companion object {
+        const val SPLASH_MS = 3500L
+    }
+
     private lateinit var prefs: Prefs
     private lateinit var cache: ContentCache
     private lateinit var screen: ScreenPlayer
@@ -63,6 +69,7 @@ class MainActivity : AppCompatActivity(), ZoneHost {
 
     private var runJob: Job? = null
     private val status = LiveStatus()
+    private val playLog by lazy { PlayLog(this) }
     private var currentMedia: Map<String, MediaFile> = emptyMap()
     private var setupResult: CompletableDeferred<String>? = null
     private val tapTimes = ArrayDeque<Long>()
@@ -97,6 +104,8 @@ class MainActivity : AppCompatActivity(), ZoneHost {
         })
 
         hideSystemUi()
+        showSplash()
+        askForAutoStart()
         start()
     }
 
@@ -241,6 +250,14 @@ class MainActivity : AppCompatActivity(), ZoneHost {
             showing = key
             status.state = if (program == null) "nothing assigned" else "playing"
             status.changed()
+        }
+
+        // Sends proof-of-play counts every minute; they wait on the device while it's offline.
+        launch {
+            while (true) {
+                delay(60_000)
+                playLog.flush { json -> api.sendPlays(token, json) }
+            }
         }
 
         // Tells the CMS what's on screen whenever it changes, at most about once a second.
@@ -434,6 +451,35 @@ class MainActivity : AppCompatActivity(), ZoneHost {
         }
     }
 
+    /** The start-up screen with the company name. It fades out after a few seconds while content loads behind it. */
+    private fun showSplash() {
+        val splash = view<View>(R.id.splash)
+        splash.visibility = View.VISIBLE
+        splash.alpha = 1f
+        splash.postDelayed({
+            splash.animate().alpha(0f).setDuration(600).withEndAction { splash.visibility = View.GONE }.start()
+        }, SPLASH_MS)
+    }
+
+    /**
+     * Android 10 and newer only let an app open itself at power-on if it may draw over other apps.
+     * Asks once; TVs without that settings screen just skip it.
+     */
+    private fun askForAutoStart() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || Settings.canDrawOverlays(this) || prefs.askedOverlay) return
+        prefs.askedOverlay = true
+        AlertDialog.Builder(this)
+            .setTitle(R.string.autostart_title)
+            .setMessage(R.string.autostart_message)
+            .setPositiveButton(R.string.autostart_allow) { _, _ ->
+                runCatching {
+                    startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                }
+            }
+            .setNegativeButton(R.string.menu_cancel, null)
+            .show()
+    }
+
     private fun surfaceViews(v: View): List<SurfaceView> = when (v) {
         is SurfaceView -> listOf(v)
         is ViewGroup -> (0 until v.childCount).flatMap { surfaceViews(v.getChildAt(it)) }
@@ -457,6 +503,11 @@ class MainActivity : AppCompatActivity(), ZoneHost {
     }
 
     override fun media(mediaId: String): MediaFile? = currentMedia[mediaId]
+
+    override fun played(item: Item, seconds: Int, plays: Int) {
+        if (seconds <= 0 && plays <= 0) return
+        runOnUiThread { playLog.add(item, seconds, plays) }
+    }
 
     private fun deviceInfo() = mapOf(
         "manufacturer" to Build.MANUFACTURER,

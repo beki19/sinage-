@@ -10,4 +10,9 @@
     <string name="menu_change_server">Change server</string>
     <string name="menu_unpair">Unpair this screen</string>
     <string name="menu_cancel">Cancel</string>
+    <string name="splash_title">MBY Software Solutions</string>
+    <string name="splash_credit">Powered by Bereket</string>
+    <string name="autostart_title">Start automatically with the TV?</string>
+    <string name="autostart_message">To open by itself when the TV turns on, this Android version needs the \"Display over other apps\" permission. Allow it on the next screen.</string>
+    <string name="autostart_allow">Allow</string>
 </resources>

@@ -126,6 +126,38 @@
             android:textSize="16sp" />
     </LinearLayout>
 
+    <!-- Start-up screen: company name in the middle, credit at the bottom. Fades out after a few seconds. -->
+    <FrameLayout
+        android:id="@+id/splash"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/bg"
+        android:clickable="true"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:letterSpacing="0.04"
+            android:paddingLeft="32dp"
+            android:paddingRight="32dp"
+            android:text="@string/splash_title"
+            android:textColor="@color/text"
+            android:textSize="48sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="40dp"
+            android:text="@string/splash_credit"
+            android:textColor="@color/muted"
+            android:textSize="18sp" />
+    </FrameLayout>
+
     <!-- Small status line (downloads, connection problems). Hidden when all is well. -->
     <TextView
         android:id="@+id/status"

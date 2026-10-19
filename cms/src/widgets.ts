@@ -72,7 +72,8 @@ if(MODE==="ticker"){const t=el("div");t.id="t";t.style.fontSize=innerHeight*.5+"
 items.forEach((it,i)=>{if(i)t.appendChild(el("span","s","•"));t.appendChild(el("span",null,it.title));});
 if(TITLE){t.insertBefore(el("span","s","•"),t.firstChild);t.insertBefore(el("strong",null,TITLE),t.firstChild);}
 root.appendChild(t);const w=t.scrollWidth,W=innerWidth;
-anim=t.animate([{transform:"translateX("+W+"px)"},{transform:"translateX("+(-w)+"px)"}],{duration:(w+W)/Math.max(W/8,60)*1000,iterations:Infinity});return;}
+// A calm, broadcast-style pace: about 20 seconds to cross the zone.
+anim=t.animate([{transform:"translateX("+W+"px)"},{transform:"translateX("+(-w)+"px)"}],{duration:(w+W)/Math.max(W/20,50)*1000,iterations:Infinity});return;}
 const box=el("div");box.id="l";const size=Math.max(14,Math.min(innerWidth/22,innerHeight/9));box.style.fontSize=size+"px";
 if(TITLE)box.appendChild(el("h1",null,TITLE));const ul=el("ul");box.appendChild(ul);root.appendChild(box);
 // Fill the box with as many whole headlines as fit, then move on to the next ones.

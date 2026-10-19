@@ -53,6 +53,9 @@ interface ZoneHost {
 
     /** Size and codec of a video, when the CMS knows them. */
     fun media(mediaId: String): MediaFile?
+
+    /** Proof of play: [item] was on screen for [seconds], counting as [plays] showings. */
+    fun played(item: Item, seconds: Int, plays: Int)
 }
 
 /** Video that never showed a picture, so the next attempt can try another way of drawing it. */
@@ -139,10 +142,14 @@ class PlaylistPlayer(
                     val only = active[0]
                     if (only != shownAlone) {
                         shownAlone = only
+                        aloneOk = false
+                        aloneSeconds = 0
                         try {
                             host.report(zoneId, only, "loading")
                             showAlone(only, fileFor)
                             host.report(zoneId, only, "playing")
+                            aloneOk = true
+                            host.played(only, 0, 1)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
@@ -151,7 +158,9 @@ class PlaylistPlayer(
                             blank()
                         }
                     }
+                    val started = System.currentTimeMillis()
                     delay(10_000)
+                    if (aloneOk) countAlone(only, ((System.currentTimeMillis() - started) / 1000).toInt())
                 }
                 else -> {
                     shownAlone = null
@@ -159,7 +168,9 @@ class PlaylistPlayer(
                         if (!item.isActiveAt(System.currentTimeMillis())) continue
                         try {
                             host.report(zoneId, item, "loading")
+                            val started = System.currentTimeMillis()
                             showFor(item, alone = active.size == 1, fileFor)
+                            host.played(item, ((System.currentTimeMillis() - started) / 1000).toInt(), 1)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
@@ -172,6 +183,17 @@ class PlaylistPlayer(
                 }
             }
         }
+    }
+
+    // An item alone in its zone stays up; each full run of its length counts as another showing.
+    private var aloneOk = false
+    private var aloneSeconds = 0
+
+    private fun countAlone(item: Item, seconds: Int) {
+        val unit = if (item.kind == "video") (exo?.duration ?: 0L).let { if (it > 0) (it / 1000).toInt() else item.duration } else item.duration
+        val before = aloneSeconds / unit.coerceAtLeast(1)
+        aloneSeconds += seconds
+        host.played(item, seconds, aloneSeconds / unit.coerceAtLeast(1) - before)
     }
 
     /** Shows the only item in the zone and returns once it's up; it stays until something else is shown. */
@@ -422,8 +444,8 @@ class PlaylistPlayer(
             textView.layoutParams = FrameLayout.LayoutParams(textW, MATCH_PARENT)
             val from = container.width.toFloat()
             val to = -textW.toFloat()
-            // Crosses the zone's width in about 8 seconds whatever the screen size.
-            val pxPerSecond = maxOf(container.width / 8f, 60f)
+            // A calm, broadcast-style pace: about 20 seconds to cross the zone, whatever the screen size.
+            val pxPerSecond = maxOf(container.width / 20f, 50f)
             ticker = ValueAnimator.ofFloat(from, to).apply {
                 duration = ((from - to) / pxPerSecond * 1000).toLong()
                 repeatCount = ValueAnimator.INFINITE

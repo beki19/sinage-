@@ -101,9 +101,17 @@ If a video still shows no picture, the player switches by itself to a compatibil
 
 Screens keep a connection open to the CMS, so playlist changes, schedule changes and remote commands reach them within a second or two instead of at the next check-in. Each screen reports what it's doing (what plays in each zone, downloads, errors such as "can't play 4K video", screen size, free space); you'll see it on the Screens tab, in the **Control** dialog and on the Dashboard, updating live. Live status needs player version 1.4.0 or newer.
 
+## Proof-of-play reports
+
+Screens on player 1.5.0 or newer count every time each item is shown and for how long, per hour, and send the counts every minute (they keep counting while offline and send them later). See them:
+
+- **Reports** tab: showings and time on screen for any period, per content (click a row to split it by screen) and per screen, a per-day chart, and **Download CSV** for a spreadsheet.
+- **Media** tab: each file shows its showings, time on screen and number of screens over the last 7 days.
+- **Dashboard**: the most played content this week.
+
 ## Kiosk tips
 
-- The app starts automatically after a reboot. On Android 10 and newer, some devices block that; on those, set the player as the default **Home** app, or use the device's own "auto-start app" setting (common on signage boxes).
+- The app starts automatically when the device boots, and comes back to the front when a TV wakes from standby. On Android 10 and newer it asks once for "Display over other apps", which it needs to start itself. If your TV still opens its own home screen, set the player as the default Home app or use the TV's own "auto-start app" setting.
 - Turn off the device's screensaver/sleep in Android settings.
 - Give the CMS computer a fixed IP address on your network so screens can always find it.
 - If the CMS is reachable from the internet, put it behind HTTPS (e.g. Caddy or nginx) and use an `https://` address in the app.

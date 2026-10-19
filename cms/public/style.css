@@ -216,6 +216,27 @@ body:not([data-role=admin]) .admin-only { display: none !important; }
 .zone-live li { display: flex; gap: 8px; align-items: flex-start; }
 .zl-icon { width: 16px; text-align: center; flex: none; }
 
+.playline { background: none; border: 0; padding: 0; color: var(--accent); text-align: left; cursor: pointer; }
+.playline:hover { text-decoration: underline; }
+.report-head { flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.report-head p { max-width: 640px; }
+.stats.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 760px) { .stats.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.rtable { display: grid; }
+.rrow { display: grid; grid-template-columns: minmax(160px, 2fr) 90px minmax(140px, 1.5fr) 110px 70px; gap: 12px; align-items: center; padding: 9px 4px; border-bottom: 1px solid var(--line); font-size: .9rem; }
+.rrow[role=button] { cursor: pointer; }
+.rrow[role=button]:hover, .rrow.focus { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.rhead { color: var(--muted); font-size: .75rem; font-weight: 600; }
+.rname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rbar { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+.rdetail { padding: 8px 4px 12px 24px; border-bottom: 1px solid var(--line); }
+@media (max-width: 700px) {
+  .rrow { grid-template-columns: 1fr auto; gap: 4px 10px; }
+  .rhead { display: none; }
+  .rrow > :nth-child(2) { grid-column: 2; grid-row: 1; }
+  .rrow > .rbar, .rrow > :nth-child(4), .rrow > :nth-child(5) { grid-column: 1 / -1; }
+}
+
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px; z-index: 10; }
 @media (max-width: 600px) {
   header { flex-wrap: wrap; padding: 10px 16px; }
@@ -346,3 +367,4 @@ svg.chart .hit:hover { fill: color-mix(in srgb, var(--series-1) 10%, transparent
   .board-row > :nth-child(6) { grid-column: 1 / -1; }
   .timeline li { grid-template-columns: 1fr; gap: 2px; }
 }
+.rrow .ghost.small { white-space: nowrap; }

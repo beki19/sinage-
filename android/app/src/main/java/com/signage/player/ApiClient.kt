@@ -61,6 +61,13 @@ class ApiClient(baseUrl: String) {
         }
     }
 
+    /** Proof of play: how often and how long each item was shown. */
+    suspend fun sendPlays(token: String, json: String) {
+        val (code, _) = requestRaw("POST", "/api/player/plays", json, token)
+        if (code == 401) throw UnpairedException()
+        if (code !in 200..299) throw IOException("HTTP $code")
+    }
+
     /** Sends what the screen is doing right now. */
     suspend fun sendStatus(token: String, json: String) {
         val (code, _) = requestRaw("POST", "/api/player/status", json, token)
