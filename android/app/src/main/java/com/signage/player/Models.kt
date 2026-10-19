@@ -55,7 +55,13 @@ data class Item(
 }
 
 /** A rectangle of the screen, in percent, looping its own items. */
-data class Zone(val id: String, val x: Float, val y: Float, val w: Float, val h: Float, val items: List<Item>)
+data class Zone(val id: String, val x: Float, val y: Float, val w: Float, val h: Float, val items: List<Item>, val transition: String = "none")
+
+/** Audio files played quietly in the background, looping. */
+data class Music(val mediaIds: List<String>, val volume: Float)
+
+/** An emergency announcement that covers the whole screen until the CMS ends it. */
+data class Alert(val id: String, val title: String, val message: String, val style: String)
 
 /** Everything that fills the screen at once: a playlist (one zone) or a layout (several). */
 data class Program(val id: String, val name: String, val zones: List<Zone>)
@@ -90,6 +96,8 @@ data class Manifest(
     val schedule: List<ScheduleRule>,
     val commands: List<Command>,
     val pollSeconds: Int,
+    val music: Music? = null,
+    val alert: Alert? = null,
 ) {
     /** The first matching time slot wins; otherwise the default. */
     fun activeProgram(now: Calendar = Calendar.getInstance()): Program? {
@@ -132,6 +140,13 @@ data class Manifest(
                     (0 until arr.length()).map { arr.getJSONObject(it) }.map { Command(it.getString("id"), it.getString("type")) }
                 }.orEmpty(),
                 pollSeconds = o.optInt("pollSeconds", 30).coerceIn(5, 3600),
+                music = o.optJSONObject("music")?.let { m ->
+                    val ids = m.optJSONArray("mediaIds") ?: return@let null
+                    Music((0 until ids.length()).map { ids.getString(it) }, m.optDouble("volume", 0.6).toFloat())
+                },
+                alert = o.optJSONObject("alert")?.let { a ->
+                    Alert(a.getString("id"), a.optString("title"), a.optString("message"), a.optString("style", "red"))
+                },
             )
         }
 
@@ -176,6 +191,7 @@ data class Manifest(
                     w = z.optDouble("w", 100.0).toFloat(),
                     h = z.optDouble("h", 100.0).toFloat(),
                     items = (0 until items.length()).mapNotNull { parseItem(items.getJSONObject(it)) },
+                    transition = z.optString("transition", "none"),
                 )
             })
         }

@@ -9,6 +9,10 @@ import {
 } from "./store.js";
 import { TEMPLATES } from "./templates.js";
 import { convertForScreens, findFfmpeg, probeVideo } from "./video.js";
+import { calendarEvents, exchangeRates, findPlaces, weather } from "./apps.js";
+import {
+  calendarHtml, countdownHtml, ethCalendarHtml, facebookHtml, instagramHtml, menuHtml, qrHtml, queueHtml, ratesHtml, weatherHtml,
+} from "./widgets2.js";
 import { clockHtml, feedHtml, parseFeed, xHtml, type Headline } from "./widgets.js";
 
 export interface AppOptions {
@@ -304,6 +308,14 @@ export function createApp(opts: AppOptions) {
             color: color(it?.color, "#ffffff"),
             background: color(it?.background, "#111827"),
           };
+        case "weather": case "ethcal": case "rates": case "countdown": case "qr":
+        case "menu": case "queue": case "calendar": case "facebook": case "instagram":
+          return {
+            ...base, kind,
+            color: color(it?.color, "#ffffff"),
+            background: color(it?.background, "#111827"),
+            config: widgetConfig(kind, it?.config ?? {}),
+          };
         case "x":
           return {
             ...base, kind,
@@ -312,10 +324,85 @@ export function createApp(opts: AppOptions) {
             background: color(it?.background, "#000000"),
           };
         default:
-          throw new HttpError(400, "items[].kind must be media, text, web, stream, clock, feed or x");
+          throw new HttpError(400, `items[].kind "${kind}" isn't a known item type`);
       }
     });
   };
+
+  /** Checks an app widget's settings and keeps only what it uses. */
+  function widgetConfig(kind: string, c: Record<string, unknown>): Record<string, unknown> {
+    const text = (v: unknown, max: number, fallback = "") => (typeof v === "string" ? v.trim().slice(0, max) : fallback);
+    const bool = (v: unknown, fallback: boolean) => (typeof v === "boolean" ? v : fallback);
+    const num = (v: unknown, min: number, max: number, field: string) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < min || n > max) throw new HttpError(400, `${field} must be ${min} to ${max}`);
+      return n;
+    };
+    const code = (v: unknown) => {
+      const s = text(v, 10).toUpperCase();
+      if (!/^[A-Z]{3}$/.test(s)) throw new HttpError(400, `"${String(v)}" isn't a currency code like USD`);
+      return s;
+    };
+    switch (kind) {
+      case "weather":
+        return {
+          place: str(c.place, "Weather city", 80),
+          lat: num(c.lat, -90, 90, "Latitude"), lon: num(c.lon, -180, 180, "Longitude"),
+          units: c.units === "f" ? "f" : "c",
+        };
+      case "ethcal":
+        return { amharic: bool(c.amharic, true), ethiopianTime: bool(c.ethiopianTime, false), showGregorian: bool(c.showGregorian, true) };
+      case "rates": {
+        const manual = bool(c.manual, false);
+        const rows = manual
+          ? (Array.isArray(c.rows) ? c.rows : []).slice(0, 20).map((r: Record<string, unknown>) => ({
+              code: code(r?.code),
+              buy: r?.buy === "" || r?.buy == null ? null : num(r.buy, 0, 1e9, "Buying rate"),
+              sell: r?.sell === "" || r?.sell == null ? null : num(r.sell, 0, 1e9, "Selling rate"),
+            }))
+          : [];
+        const currencies = manual ? rows.map((r) => r.code) : (Array.isArray(c.currencies) ? c.currencies : []).slice(0, 20).map(code);
+        if (!currencies.length) throw new HttpError(400, "Pick at least one currency");
+        return { title: text(c.title, 80), base: code(c.base ?? "ETB"), manual, currencies, rows };
+      }
+      case "countdown":
+        return { title: text(c.title, 120), target: localDateTime(c.target, "Countdown date") ?? (() => { throw new HttpError(400, "Pick the date to count down to"); })(), doneText: text(c.doneText, 120) };
+      case "qr":
+        return { text: str(c.text, "QR code link or text", 1000), caption: text(c.caption, 120) };
+      case "menu": {
+        const sections = (Array.isArray(c.sections) ? c.sections : []).slice(0, 20).map((s: Record<string, unknown>) => ({
+          name: text(s?.name, 80),
+          items: (Array.isArray(s?.items) ? s.items : []).slice(0, 60).map((i: Record<string, unknown>) => ({
+            name: text(i?.name, 100), price: text(i?.price, 30), note: text(i?.note, 160),
+          })).filter((i: { name: string }) => i.name),
+        }));
+        if (!sections.some((s) => s.items.length)) throw new HttpError(400, "Add at least one menu item");
+        return { title: text(c.title, 100), currency: text(c.currency, 10), accent: color(c.accent, "#f59e0b"), sections };
+      }
+      case "queue":
+        return {
+          title: text(c.title, 60, "Now serving"), prefix: text(c.prefix, 4).toUpperCase(),
+          counters: (Array.isArray(c.counters) ? c.counters : []).map((x) => text(x, 30)).filter(Boolean).slice(0, 12),
+          accent: color(c.accent, "#22c55e"),
+        };
+      case "calendar": {
+        const raw = str(c.url, "Calendar link", 2000).replace(/^webcal:/i, "https:");
+        return { url: httpUrl(raw, "Calendar link"), title: text(c.title, 80), accent: color(c.accent, "#2563eb") };
+      }
+      case "facebook": {
+        const url = httpUrl(c.pageUrl, "Facebook page link");
+        if (!/(^|\.)facebook\.com$/i.test(new URL(url).hostname)) throw new HttpError(400, "Use a facebook.com page link");
+        return { pageUrl: url };
+      }
+      case "instagram": {
+        const posts = (Array.isArray(c.posts) ? c.posts : []).map((p) => text(p, 300)).filter((p) => /instagram\.com\/(p|reel|tv)\/[\w-]+/i.test(p)).slice(0, 20);
+        if (!posts.length) throw new HttpError(400, "Add at least one Instagram post link (instagram.com/p/…)");
+        return { posts, seconds: num(c.seconds ?? 20, 5, 600, "Seconds per post") };
+      }
+      default:
+        return {};
+    }
+  }
 
   /** "@SkyNews", "SkyNews" or "https://x.com/SkyNews" -> "SkyNews" */
   function xHandle(raw: unknown): string {
@@ -406,6 +493,10 @@ export function createApp(opts: AppOptions) {
       target.layoutId = body.layoutId ? findOr404(db.layouts, String(body.layoutId), "Layout").id : null;
     }
     if (target.schedule && body?.schedule !== undefined) target.schedule = parseSchedule(body.schedule);
+    if ("schedule" in target && body?.musicPlaylistId !== undefined) {
+      (target as { musicPlaylistId?: string | null }).musicPlaylistId =
+        body.musicPlaylistId ? findOr404(db.playlists, String(body.musicPlaylistId), "Playlist").id : null;
+    }
   }
 
   /**
@@ -438,8 +529,8 @@ export function createApp(opts: AppOptions) {
       switch (it.kind) {
         case "media": {
           const m = db.media.find((x) => x.id === it.mediaId);
-          // A video being converted for TVs waits until its screen copy is ready.
-          return m && m.convert !== "running" ? [{ ...common, kind: m.type, mediaId: m.id }] : [];
+          // A video being converted for TVs waits until its screen copy is ready; audio belongs to background music.
+          return m && m.convert !== "running" && m.type !== "audio" ? [{ ...common, kind: m.type, mediaId: m.id }] : [];
         }
         case "text":
           return [{ ...common, kind: "text", text: it.text, color: it.color, background: it.background, scroll: !!it.scroll }];
@@ -455,12 +546,34 @@ export function createApp(opts: AppOptions) {
           return [{ ...common, kind: "html", html: feedHtml({ itemId: it.id, mode: it.mode ?? "ticker", title: it.title ?? "", color: it.color!, background: it.background! }) }];
         case "x":
           return [{ ...common, kind: "html", html: xHtml({ handle: it.handle!, color: it.color!, background: it.background! }) }];
+        case "weather": case "ethcal": case "rates": case "countdown": case "qr":
+        case "menu": case "queue": case "calendar": case "facebook": case "instagram":
+          return [{ ...common, kind: "html", html: widgetHtml(it) }];
         default:
           return [];
       }
     });
 
   /** What screens download for a media item: its TV-friendly copy if it has one. */
+  /** The page for an app widget. */
+  const widgetHtml = (it: PlaylistItem): string => {
+    const c = (it.config ?? {}) as Record<string, any>;
+    const colors = { color: it.color ?? "#ffffff", background: it.background ?? "#111827" };
+    switch (it.kind) {
+      case "weather": return weatherHtml({ ...colors, itemId: it.id, place: c.place });
+      case "ethcal": return ethCalendarHtml({ ...colors, amharic: c.amharic, ethiopianTime: c.ethiopianTime, showGregorian: c.showGregorian });
+      case "rates": return ratesHtml({ ...colors, itemId: it.id, title: c.title, base: c.base, manual: c.manual });
+      case "countdown": return countdownHtml({ ...colors, title: c.title, target: c.target, doneText: c.doneText });
+      case "qr": return qrHtml({ ...colors, text: c.text, caption: c.caption });
+      case "menu": return menuHtml({ ...colors, title: c.title, currency: c.currency, sections: c.sections, accent: c.accent });
+      case "queue": return queueHtml({ ...colors, itemId: it.id, title: c.title, accent: c.accent });
+      case "calendar": return calendarHtml({ ...colors, itemId: it.id, title: c.title, accent: c.accent });
+      case "facebook": return facebookHtml({ ...colors, pageUrl: c.pageUrl });
+      case "instagram": return instagramHtml({ ...colors, posts: c.posts, seconds: c.seconds });
+      default: return "";
+    }
+  };
+
   const mediaFile = (m: Media) => {
     const f = m.screenCopy ?? { size: m.size, sha256: m.sha256 };
     const v = m.screenCopy ? m.screenCopy.video : m.video;
@@ -538,11 +651,14 @@ export function createApp(opts: AppOptions) {
       return {
         id: ref,
         name: l.name,
-        zones: l.zones.map((z) => ({ id: z.id, x: z.x, y: z.y, w: z.w, h: z.h, items: screenItems(z.item ? zonePlaylist(z.item) : playlistById(z.playlistId)) })),
+        zones: l.zones.map((z) => {
+          const p = z.item ? undefined : playlistById(z.playlistId);
+          return { id: z.id, x: z.x, y: z.y, w: z.w, h: z.h, transition: p?.transition ?? "none", items: screenItems(z.item ? zonePlaylist(z.item) : p) };
+        }),
       };
     }
     const p = playlistById(refId)!;
-    return { id: ref, name: p.name, zones: [{ id: "main", x: 0, y: 0, w: 100, h: 100, items: screenItems(p) }] };
+    return { id: ref, name: p.name, zones: [{ id: "main", x: 0, y: 0, w: 100, h: 100, transition: p.transition ?? "none", items: screenItems(p) }] };
   };
 
   /** The playlist a version-1.0 player (fullscreen images and videos only) should show for a program. */
@@ -555,7 +671,7 @@ export function createApp(opts: AppOptions) {
     return playlistById(biggest?.playlistId ?? null);
   };
 
-  type Assignment = { playlistId: string | null; layoutId: string | null; schedule: ScheduleRule[] };
+  type Assignment = { playlistId: string | null; layoutId: string | null; schedule: ScheduleRule[]; musicPlaylistId?: string | null };
 
   /** Where a screen takes its content from: its group if it has one, otherwise itself. */
   const assignmentOf = (device: Device): Assignment =>
@@ -606,12 +722,14 @@ export function createApp(opts: AppOptions) {
     const schedule = scheduleRefs(a);
     const refs = [...new Set([defaultProgram, ...schedule.map((r) => r.program)])].filter((r): r is string => !!r);
     const programs = refs.map(programFor);
-    const mediaIds = new Set(programs.flatMap((p) => p.zones.flatMap((z) => z.items.flatMap((i) => (i.mediaId ? [i.mediaId] : [])))));
+    const musicIds = (playlistById(a.musicPlaylistId ?? null)?.items ?? [])
+      .flatMap((it) => (it.kind === "media" && db.media.find((m) => m.id === it.mediaId)?.type === "audio" ? [it.mediaId!] : []));
+    const mediaIds = new Set([...musicIds, ...programs.flatMap((p) => p.zones.flatMap((z) => z.items.flatMap((i) => (i.mediaId ? [i.mediaId] : []))))]);
     const media = db.media.filter((m) => mediaIds.has(m.id)).map(mediaFile);
     // Players from version 1.0 only understand `items`: images and videos of one playlist, picked by the server's clock.
     const legacyRef = activeRef(a);
     const version = crypto.createHash("sha256")
-      .update(JSON.stringify([device.name, programs, defaultProgram, schedule, media, legacyRef]))
+      .update(JSON.stringify([device.name, programs, defaultProgram, schedule, media, legacyRef, musicIds]))
       .digest("hex").slice(0, 16);
     const playlist = legacyPlaylist(legacyRef);
     const legacyItems = (playlist?.items ?? []).flatMap((it) => {
@@ -628,8 +746,10 @@ export function createApp(opts: AppOptions) {
       programs,
       defaultProgram,
       schedule,
+      music: musicIds.length ? { mediaIds: musicIds, volume: 0.6 } : null,
       // Not part of `version`: they don't change what's on screen.
       commands: pendingCommands(device).map(({ id: cid, type }) => ({ id: cid, type })),
+      alert: alertFor(device),
       // Pass back to /api/player/wait to be told the moment either changes.
       changeKey: changeKey(device, version),
       pollSeconds: 15,
@@ -638,7 +758,15 @@ export function createApp(opts: AppOptions) {
 
   /** Changes whenever a screen should fetch its manifest again: new content or a new command. */
   function changeKey(device: Device, version: string = manifestVersion(device)): string {
-    return `${version}.${pendingCommands(device).map((c) => c.id).join(",")}`;
+    return `${version}.${pendingCommands(device).map((c) => c.id).join(",")}.${alertFor(device)?.id ?? ""}`;
+  }
+
+  /** The emergency announcement this screen should show right now, if any. */
+  function alertFor(device: Device) {
+    const a = db.alert;
+    if (!a || (a.endsAt && Date.parse(a.endsAt) <= Date.now())) return null;
+    if (a.groupIds.length && !(device.groupId && a.groupIds.includes(device.groupId))) return null;
+    return { id: a.id, title: a.title, message: a.message, style: a.style };
   }
 
   function manifestVersion(device: Device): string {
@@ -742,7 +870,7 @@ export function createApp(opts: AppOptions) {
     }),
     limits: { fileSize: (opts.maxUploadMb ?? 2048) * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
-      cb(null, file.mimetype.startsWith("image/") || file.mimetype.startsWith("video/"));
+      cb(null, /^(image|video|audio)\//.test(file.mimetype));
     },
   });
 
@@ -758,7 +886,7 @@ export function createApp(opts: AppOptions) {
       const m: Media = {
         id: path.parse(f.filename).name,
         name: f.originalname,
-        type: f.mimetype.startsWith("video/") ? "video" : "image",
+        type: f.mimetype.startsWith("video/") ? "video" : f.mimetype.startsWith("audio/") ? "audio" : "image",
         mime: f.mimetype,
         filename: f.filename,
         size: f.size,
@@ -832,6 +960,10 @@ export function createApp(opts: AppOptions) {
     const p = findOr404(db.playlists, String(req.params.id), "Playlist");
     if (req.body?.name !== undefined) p.name = str(req.body.name, "name");
     if (req.body?.items !== undefined) p.items = parseItems(req.body.items);
+    if (req.body?.transition !== undefined) {
+      if (!["none", "fade", "slide", "zoom"].includes(req.body.transition)) throw new HttpError(400, "transition must be none, fade, slide or zoom");
+      p.transition = req.body.transition;
+    }
     p.updatedAt = now();
     store.save();
     res.json(p);
@@ -1473,6 +1605,125 @@ export function createApp(opts: AppOptions) {
     notifyChange();
     res.status(204).end();
   }));
+
+  // ---------- app widgets: live data, queues, emergency alerts ----------
+
+  app.get("/api/geocode", requireLogin, route(async (req, res) => {
+    const q = str(req.query.q, "City name", 80);
+    try {
+      res.json({ places: await findPlaces(q) });
+    } catch (err) {
+      throw new HttpError(502, `Couldn't look that up: ${(err as Error).message}`);
+    }
+  }));
+
+  /** The live part of a widget: weather, rates, calendar events or the queue number. */
+  const widgetData = async (it: PlaylistItem) => {
+    const c = (it.config ?? {}) as Record<string, any>;
+    switch (it.kind) {
+      case "weather": return weather(c.lat, c.lon, c.units);
+      case "rates": {
+        if (c.manual) return { rows: c.rows, updated: db.playlists.find((p) => p.items.includes(it))?.updatedAt ?? now() };
+        const r = await exchangeRates(c.base, c.currencies);
+        return { rows: c.currencies.filter((k: string) => r.rates[k]).map((k: string) => ({ code: k, rate: r.rates[k] })), updated: r.updated };
+      }
+      case "calendar": return { events: await calendarEvents(c.url) };
+      case "queue": return queueView(it);
+      default: throw new HttpError(404, "This item has no live data");
+    }
+  };
+
+  app.get("/api/player/widget/:itemId", requireDevice, route(async (req, res) => {
+    const it = allItems().find((x) => x.id === String(req.params.itemId));
+    if (!it) throw new HttpError(404, "Widget not found");
+    try {
+      res.json(await widgetData(it));
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      throw new HttpError(502, (err as Error).message);
+    }
+  }));
+
+  /** Admin preview of the same data, to check a weather city or a calendar link while setting it up. */
+  app.post("/api/widget-preview", requireLogin, route(async (req, res) => {
+    const [it] = parseItems([req.body]);
+    try {
+      res.json(await widgetData(it));
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      throw new HttpError(502, (err as Error).message);
+    }
+  }));
+
+  const queueView = (it: PlaylistItem) => {
+    const c = (it.config ?? {}) as Record<string, any>;
+    const q = db.queues[it.id] ?? { number: 0, counter: "", history: [], at: now() };
+    const label = (n: number) => (n ? `${c.prefix ? c.prefix + "-" : ""}${String(n).padStart(3, "0")}` : "—");
+    return { number: q.number, label: label(q.number), counter: q.counter, history: q.history, at: q.at };
+  };
+
+  /** Every queue widget in use, with where it is, for the Apps tab. */
+  app.get("/api/queues", requireLogin, route((_req, res) => {
+    const where = (id: string) => [
+      ...db.playlists.filter((p) => p.items.some((i) => i.id === id)).map((p) => p.name),
+      ...db.layouts.filter((l) => l.zones.some((z) => z.item?.id === id)).map((l) => l.name),
+    ];
+    res.json(allItems().filter((i) => i.kind === "queue").map((i) => ({
+      itemId: i.id, title: (i.config as Record<string, string>)?.title, counters: (i.config as Record<string, string[]>)?.counters ?? [],
+      in: where(i.id), ...queueView(i),
+    })));
+  }));
+
+  app.post("/api/queues/:itemId", requireLogin, route((req, res) => {
+    const it = allItems().find((x) => x.id === String(req.params.itemId) && x.kind === "queue");
+    if (!it) throw new HttpError(404, "Queue not found");
+    const q = db.queues[it.id] ?? { number: 0, counter: "", history: [], at: now() };
+    const prev = queueView(it).label;
+    const action = req.body?.action;
+    if (action === "next") q.number += 1;
+    else if (action === "back") q.number = Math.max(0, q.number - 1);
+    else if (action === "reset") { q.number = 0; q.history = []; }
+    else if (action === "set") q.number = Math.max(0, Math.min(99_999, Math.round(Number(req.body?.number) || 0)));
+    else throw new HttpError(400, "action must be next, back, reset or set");
+    if (req.body?.counter !== undefined) q.counter = typeof req.body.counter === "string" ? req.body.counter.slice(0, 30) : "";
+    if (action === "next" && q.number > 1) q.history = [prev, ...q.history].slice(0, 4);
+    q.at = now();
+    db.queues[it.id] = q;
+    store.save();
+    res.json(queueView(it));
+  }));
+
+  app.get("/api/alert", requireLogin, route((_req, res) => res.json(db.alert)));
+
+  app.post("/api/alert", requireLogin, route((req, res) => {
+    const b = req.body ?? {};
+    const minutes = b.minutes ? Math.max(1, Math.min(7 * 24 * 60, Number(b.minutes) || 0)) : 0;
+    db.alert = {
+      id: id(),
+      title: str(b.title, "Title", 80),
+      message: typeof b.message === "string" ? b.message.trim().slice(0, 500) : "",
+      style: ["red", "amber", "blue", "green"].includes(b.style) ? b.style : "red",
+      groupIds: (Array.isArray(b.groupIds) ? b.groupIds : []).map((g: unknown) => findOr404(db.groups, String(g), "Group").id),
+      startedAt: now(),
+      endsAt: minutes ? new Date(Date.now() + minutes * 60_000).toISOString() : null,
+    };
+    store.save();
+    res.status(201).json(db.alert);
+  }));
+
+  app.delete("/api/alert", requireLogin, route((_req, res) => {
+    db.alert = null;
+    store.save();
+    res.status(204).end();
+  }));
+
+  // An announcement with an end time ends by itself: wake screens when it expires.
+  setInterval(() => {
+    if (db.alert?.endsAt && Date.parse(db.alert.endsAt) <= Date.now()) {
+      db.alert = null;
+      store.save();
+    }
+  }, 15_000).unref();
 
   // ---------- proof of play ----------
 

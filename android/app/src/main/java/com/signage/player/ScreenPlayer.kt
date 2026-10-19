@@ -19,7 +19,12 @@ class ScreenPlayer(
 ) {
     private var zones = emptyList<PlaylistPlayer>()
 
-    fun play(scope: CoroutineScope, program: Program?, serverUrl: String, deviceToken: String, host: ZoneHost, fileFor: (String) -> File?) {
+    fun play(
+        scope: CoroutineScope, program: Program?, serverUrl: String, deviceToken: String, host: ZoneHost,
+        /** Background music is playing, so videos stay quiet. */
+        musicOn: Boolean = false,
+        fileFor: (String) -> File?,
+    ) {
         stop()
         val active = program?.zones.orEmpty().filter { it.items.isNotEmpty() && it.w > 0 && it.h > 0 }
         emptyView.visibility = if (active.isEmpty()) View.VISIBLE else View.GONE
@@ -28,7 +33,7 @@ class ScreenPlayer(
         zones = active.map { z ->
             val box = FrameLayout(context).apply { setBackgroundColor(Color.BLACK) }
             stage.addZone(box, RectF(z.x, z.y, z.x + z.w, z.y + z.h))
-            PlaylistPlayer(context, box, withSound = z === loudest, serverUrl, deviceToken, z.id, host).also { it.play(scope, z.items, fileFor) }
+            PlaylistPlayer(context, box, withSound = z === loudest && !musicOn, serverUrl, deviceToken, z.id, host, z.transition).also { it.play(scope, z.items, fileFor) }
         }
     }
 

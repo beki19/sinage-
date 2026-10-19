@@ -26,6 +26,7 @@
         <button data-tab="playlists">Playlists</button>
         <button data-tab="layouts">Layouts</button>
         <button data-tab="devices">Screens</button>
+        <button data-tab="apps">Apps</button>
         <button data-tab="reports">Reports</button>
         <button data-tab="users" class="admin-only">Users</button>
       </nav>
@@ -109,8 +110,8 @@
 
       <section id="tab-media" class="tab" hidden>
         <label id="dropzone" class="dropzone edit-only">
-          <input type="file" id="file-input" accept="image/*,video/*" multiple hidden>
-          <span>Drop images or videos here, or click to choose files</span>
+          <input type="file" id="file-input" accept="image/*,video/*,audio/*,application/pdf" multiple hidden>
+          <span>Drop images, videos, music or PDFs here, or click to choose files. Each PDF page becomes a slide.</span>
           <progress id="upload-progress" max="100" value="0" hidden></progress>
         </label>
         <div id="media-grid" class="grid"></div>
@@ -147,6 +148,13 @@
           <div id="layout-editor" class="card">
             <p class="muted">Pick or create a layout.</p>
           </div>
+        </div>
+      </section>
+
+      <section id="tab-apps" class="tab" hidden>
+        <div class="apps-grid">
+          <div class="card" id="alert-card"></div>
+          <div class="card" id="queue-card"></div>
         </div>
       </section>
 

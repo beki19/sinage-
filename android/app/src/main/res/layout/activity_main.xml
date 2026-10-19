@@ -126,6 +126,33 @@
             android:textSize="16sp" />
     </LinearLayout>
 
+    <!-- Emergency announcement from the CMS: covers everything until it's ended. -->
+    <LinearLayout
+        android:id="@+id/alert"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="48dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/alert_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:textSize="64sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/alert_message"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:gravity="center"
+            android:textSize="32sp" />
+    </LinearLayout>
+
     <!-- Start-up screen: company name in the middle, credit at the bottom. Fades out after a few seconds. -->
     <FrameLayout
         android:id="@+id/splash"

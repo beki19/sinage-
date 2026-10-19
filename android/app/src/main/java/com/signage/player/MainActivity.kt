@@ -70,6 +70,7 @@ class MainActivity : AppCompatActivity(), ZoneHost {
     private var runJob: Job? = null
     private val status = LiveStatus()
     private val playLog by lazy { PlayLog(this) }
+    private val music by lazy { MusicPlayer(this) }
     private var currentMedia: Map<String, MediaFile> = emptyMap()
     private var setupResult: CompletableDeferred<String>? = null
     private val tapTimes = ArrayDeque<Long>()
@@ -111,6 +112,7 @@ class MainActivity : AppCompatActivity(), ZoneHost {
 
     override fun onDestroy() {
         screen.release()
+        music.release()
         super.onDestroy()
     }
 
@@ -246,7 +248,8 @@ class MainActivity : AppCompatActivity(), ZoneHost {
             currentMedia = files
             status.program = program?.id
             status.zones.clear()
-            screen.play(this, program, api.baseUrl, token, this@MainActivity) { id -> files[id]?.takeIf { cache.isCached(it) }?.let { cache.fileFor(it) } }
+            music.play(m.music, files) { media -> media.takeIf { cache.isCached(it) }?.let { cache.fileFor(it) } }
+            screen.play(this, program, api.baseUrl, token, this@MainActivity, musicOn = music.isOn) { id -> files[id]?.takeIf { cache.isCached(it) }?.let { cache.fileFor(it) } }
             showing = key
             status.state = if (program == null) "nothing assigned" else "playing"
             status.changed()
@@ -296,6 +299,7 @@ class MainActivity : AppCompatActivity(), ZoneHost {
                 val json = api.manifest(token)
                 val m = Manifest.parse(json)
                 pollSeconds = m.pollSeconds
+                showAlert(m.alert)
                 for (cmd in m.commands) {
                     if (handled.add(cmd.id)) refresh = runCommand(api, token, cmd, handled) || refresh
                 }
@@ -449,6 +453,26 @@ class MainActivity : AppCompatActivity(), ZoneHost {
             }
             ByteArrayOutputStream().also { small.compress(Bitmap.CompressFormat.JPEG, 75, it) }.toByteArray()
         }
+    }
+
+    /** Covers everything with the CMS's emergency announcement, or takes it away. */
+    private fun showAlert(alert: Alert?) {
+        val box = view<View>(R.id.alert)
+        if (alert == null) {
+            box.visibility = View.GONE
+            return
+        }
+        val (bg, fg) = when (alert.style) {
+            "amber" -> 0xFFF59E0B.toInt() to 0xFF1F1300.toInt()
+            "blue" -> 0xFF1D4ED8.toInt() to 0xFFFFFFFF.toInt()
+            "green" -> 0xFF15803D.toInt() to 0xFFFFFFFF.toInt()
+            else -> 0xFFB91C1C.toInt() to 0xFFFFFFFF.toInt()
+        }
+        box.setBackgroundColor(bg)
+        view<TextView>(R.id.alert_title).apply { text = alert.title; setTextColor(fg) }
+        view<TextView>(R.id.alert_message).apply { text = alert.message; setTextColor(fg); visibility = if (alert.message.isBlank()) View.GONE else View.VISIBLE }
+        box.visibility = View.VISIBLE
+        box.bringToFront()
     }
 
     /** The start-up screen with the company name. It fades out after a few seconds while content loads behind it. */

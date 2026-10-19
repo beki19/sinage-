@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export type MediaType = "image" | "video";
+export type MediaType = "image" | "video" | "audio";
 
 export interface Media {
   id: string;
@@ -39,8 +39,13 @@ export interface VideoInfo {
  * clock:  a world clock with one or more cities
  * feed:   news headlines from an RSS feed such as Google News, as a ticker or a list
  * x:      recent posts from an X (Twitter) account
+ * weather, ethcal, rates, countdown, qr, menu, queue, calendar, facebook, instagram: app widgets, set up by `config`
  */
-export type ItemKind = "media" | "text" | "web" | "stream" | "clock" | "feed" | "x";
+export type ItemKind =
+  | "media" | "text" | "web" | "stream" | "clock" | "feed" | "x"
+  | "weather" | "ethcal" | "rates" | "countdown" | "qr" | "menu" | "queue" | "calendar" | "facebook" | "instagram";
+
+export const WIDGET_KINDS = ["weather", "ethcal", "rates", "countdown", "qr", "menu", "queue", "calendar", "facebook", "instagram"] as const;
 
 export interface PlaylistItem {
   id: string;
@@ -69,12 +74,18 @@ export interface PlaylistItem {
   title?: string;
   /** kind = x: account name without the @ */
   handle?: string;
+  /** App widgets: their settings, checked per kind when saved. */
+  config?: Record<string, unknown>;
 }
+
+export type Transition = "none" | "fade" | "slide" | "zoom";
 
 export interface Playlist {
   id: string;
   name: string;
   items: PlaylistItem[];
+  /** How images change: cut, cross-fade, slide in, or a slow zoom (Ken Burns). */
+  transition?: Transition;
   updatedAt: string;
 }
 
@@ -121,6 +132,8 @@ export interface Device {
   layoutId: string | null;
   /** Time slots that override the default. The first matching one wins. */
   schedule: ScheduleRule[];
+  /** A playlist of audio files played quietly in the background. */
+  musicPlaylistId?: string | null;
   /** When set, the screen shows its group's content and schedule instead of its own. */
   groupId: string | null;
   /** Waiting for the screen to pick up on its next check-in. */
@@ -174,7 +187,29 @@ export interface Group {
   playlistId: string | null;
   layoutId: string | null;
   schedule: ScheduleRule[];
+  /** A playlist of audio files played quietly in the background. */
+  musicPlaylistId?: string | null;
   createdAt: string;
+}
+
+/** An urgent message that takes over the screens it targets until it's ended (or expires). */
+export interface Alert {
+  id: string;
+  title: string;
+  message: string;
+  style: "red" | "amber" | "blue" | "green";
+  /** Empty = every screen. */
+  groupIds: string[];
+  startedAt: string;
+  endsAt: string | null;
+}
+
+/** "Now serving" state for one queue widget. */
+export interface QueueState {
+  number: number;
+  counter: string;
+  history: string[];
+  at: string;
 }
 
 /**
@@ -242,6 +277,8 @@ export interface Data {
   playStats: PlayStat[];
   /** One-off data upgrades already applied. */
   migrations: string[];
+  alert: Alert | null;
+  queues: Record<string, QueueState>;
 }
 
 export interface PlayStat {
@@ -261,6 +298,8 @@ const empty = (): Data => ({
   events: [],
   playStats: [],
   migrations: [],
+  alert: null,
+  queues: {},
 });
 
 /** Small JSON-file database. Fine for hundreds of screens; swap for SQL beyond that. */

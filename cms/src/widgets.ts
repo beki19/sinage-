@@ -5,9 +5,9 @@
  */
 
 /** JSON that is safe inside a <script> tag. */
-const scriptJson = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
+export const scriptJson = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
 
-const page = (style: string, body: string, script: string) => `<!doctype html>
+export const page = (style: string, body: string, script: string) => `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>html,body{margin:0;height:100%;overflow:hidden;font-family:system-ui,Roboto,"Segoe UI",sans-serif}${style}</style>
 </head><body>${body}<script>${script}</script></body></html>`;

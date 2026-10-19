@@ -1,5 +1,7 @@
 package com.signage.player
 
+import android.animation.ObjectAnimator
+import android.animation.PropertyValuesHolder
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
@@ -75,11 +77,18 @@ class PlaylistPlayer(
     private val deviceToken: String,
     private val zoneId: String,
     private val host: ZoneHost,
+    /** How one image gives way to the next: none, fade, slide or zoom (a slow Ken Burns zoom with a fade). */
+    private val transition: String = "none",
 ) {
-    private val imageView = ImageView(context).apply {
-        scaleType = ImageView.ScaleType.FIT_CENTER
-        visibility = View.INVISIBLE
+    // Two image views take turns, so the next picture can fade or slide in over the current one.
+    private val images = Array(2) {
+        ImageView(context).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            visibility = View.INVISIBLE
+        }
     }
+    private var front = 0
+    private var zoom: ObjectAnimator? = null
     private val textView = AppCompatTextView(context).apply { gravity = Gravity.CENTER }
     private val textBox = FrameLayout(context).apply {
         visibility = View.INVISIBLE
@@ -93,7 +102,7 @@ class PlaylistPlayer(
     private var job: Job? = null
 
     init {
-        container.addView(imageView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        for (iv in images) container.addView(iv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         container.addView(textBox, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
     }
 
@@ -199,7 +208,7 @@ class PlaylistPlayer(
     /** Shows the only item in the zone and returns once it's up; it stays until something else is shown. */
     private suspend fun showAlone(item: Item, fileFor: (String) -> File?) {
         when (item.kind) {
-            "image" -> showImage(fileFor(item.mediaId!!)!!)
+            "image" -> showImage(fileFor(item.mediaId!!)!!, item)
             "video" -> {
                 ensureExo().repeatMode = Player.REPEAT_MODE_ONE
                 playVideo(MediaItem.fromUri(Uri.fromFile(fileFor(item.mediaId!!)!!)), untilEnded = false)
@@ -213,7 +222,7 @@ class PlaylistPlayer(
     private suspend fun showFor(item: Item, alone: Boolean, fileFor: (String) -> File?) {
         when (item.kind) {
             "image" -> {
-                showImage(fileFor(item.mediaId!!)!!)
+                showImage(fileFor(item.mediaId!!)!!, item)
                 host.report(zoneId, item, "playing")
                 delay(item.duration * 1000L)
             }
@@ -246,11 +255,55 @@ class PlaylistPlayer(
 
     // ---------- images ----------
 
-    private suspend fun showImage(file: File) {
+    private suspend fun showImage(file: File, item: Item) {
         val bitmap = withContext(Dispatchers.IO) { decodeForScreen(file) }
             ?: throw IllegalStateException("Cannot decode ${file.name}")
-        imageView.setImageBitmap(bitmap)
-        reveal(imageView)
+        val old = images[front]
+        val next = images[1 - front]
+        front = 1 - front
+        zoom?.cancel()
+        next.animate().cancel()
+        next.alpha = 1f
+        next.translationX = 0f
+        next.scaleX = 1f
+        next.scaleY = 1f
+        next.setImageBitmap(bitmap)
+        next.bringToFront()
+        val fromImage = old.visibility == View.VISIBLE
+        if (!fromImage || transition == "none") {
+            reveal(next)
+        } else {
+            // Keep the old picture up underneath while the new one comes in, then hide it.
+            reveal(next, keep = old)
+            val w = container.width.toFloat()
+            val done = Runnable {
+                old.visibility = View.INVISIBLE
+                old.translationX = 0f
+            }
+            when (transition) {
+                "slide" -> {
+                    next.translationX = w
+                    next.animate().translationX(0f).setDuration(TRANSITION_MS).start()
+                    old.animate().translationX(-w).setDuration(TRANSITION_MS).withEndAction(done).start()
+                }
+                else -> {
+                    next.alpha = 0f
+                    next.animate().alpha(1f).setDuration(TRANSITION_MS).withEndAction(done).start()
+                }
+            }
+        }
+        if (transition == "zoom") {
+            // Ken Burns: a slow push-in over the time the picture is on screen.
+            zoom = ObjectAnimator.ofPropertyValuesHolder(
+                next,
+                PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.1f),
+                PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.1f),
+            ).apply {
+                duration = item.duration * 1000L + TRANSITION_MS
+                interpolator = LinearInterpolator()
+                start()
+            }
+        }
     }
 
     /** Decodes at roughly zone resolution so a 6000px photo doesn't run a TV box out of memory. */
@@ -472,8 +525,9 @@ class PlaylistPlayer(
     // ---------- switching ----------
 
     /** Makes [view] the one on top. The video view stays underneath and shows through when nothing covers it. */
-    private fun reveal(view: View?) {
-        imageView.visibility = if (view == imageView) View.VISIBLE else View.INVISIBLE
+    private fun reveal(view: View?, keep: View? = null) {
+        for (iv in images) iv.visibility = if (iv == view || iv == keep) View.VISIBLE else View.INVISIBLE
+        if (view !in images) zoom?.cancel()
         textBox.visibility = if (view == textBox) View.VISIBLE else View.INVISIBLE
         if (view != textBox) stopTicker()
         webView?.let { wv ->
@@ -493,5 +547,6 @@ class PlaylistPlayer(
     private companion object {
         const val TAG = "PlaylistPlayer"
         const val FIRST_FRAME_TIMEOUT_MS = 15_000L
+        const val TRANSITION_MS = 800L
     }
 }

@@ -610,3 +610,138 @@ test("YouTube plays with sound unless it's switched off", async () => {
   ] }, admin)).json;
   assert.deepEqual(pl.items.map((i: { sound: boolean }) => i.sound), [true, false]);
 });
+
+test("app widgets: settings are checked and each becomes a page for the screen", async () => {
+  const good = [
+    { kind: "weather", config: { place: "Addis Ababa", lat: 9.03, lon: 38.74 } },
+    { kind: "ethcal", config: { amharic: true } },
+    { kind: "rates", config: { base: "ETB", currencies: ["USD", "EUR"] } },
+    { kind: "rates", config: { manual: true, rows: [{ code: "usd", buy: 150.5, sell: 153 }] } },
+    { kind: "countdown", config: { title: "Opening", target: "2027-01-01T09:00" } },
+    { kind: "qr", config: { text: "https://example.com/menu", caption: "Scan for the menu" } },
+    { kind: "menu", config: { title: "Coffee", currency: "ETB", sections: [{ name: "Hot", items: [{ name: "Macchiato", price: "45" }] }] } },
+    { kind: "queue", config: { prefix: "a", counters: ["Counter 1", "Counter 2"] } },
+    { kind: "calendar", config: { url: "webcal://example.com/cal.ics", title: "Room 1" } },
+    { kind: "facebook", config: { pageUrl: "https://www.facebook.com/somepage" } },
+    { kind: "instagram", config: { posts: ["https://www.instagram.com/p/ABC123/"] } },
+  ];
+  const pl = await api("POST", "/api/playlists", { name: "Widgets 2", items: good }, admin);
+  assert.equal(pl.status, 201, JSON.stringify(pl.json));
+  assert.equal(pl.json.items[3].config.rows[0].code, "USD");
+  assert.equal(pl.json.items[7].config.prefix, "A");
+  assert.equal(pl.json.items[8].config.url, "https://example.com/cal.ics");
+
+  for (const bad of [
+    { kind: "weather", config: { place: "X", lat: 200, lon: 0 } },
+    { kind: "rates", config: { currencies: [] } },
+    { kind: "rates", config: { currencies: ["dollars"] } },
+    { kind: "countdown", config: { title: "x" } },
+    { kind: "menu", config: { sections: [] } },
+    { kind: "facebook", config: { pageUrl: "https://evil.example.com/" } },
+    { kind: "instagram", config: { posts: ["https://example.com"] } },
+  ]) {
+    assert.equal((await api("POST", "/api/playlists", { name: "x", items: [bad] }, admin)).status, 400, JSON.stringify(bad));
+  }
+
+  const screen = await pairScreen("Widget TV 2", { playlistId: pl.json.id });
+  const items = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json.programs[0].zones[0].items;
+  assert.equal(items.length, good.length);
+  assert.ok(items.every((i: { kind: string }) => i.kind === "html"));
+  assert.match(items[1].html, /መስከረም/);
+  assert.match(items[5].html, /<svg[^>]*viewBox/);
+  assert.match(items[6].html, /Macchiato/);
+
+  // Manual rates come straight from the CMS, no internet needed.
+  const rates = (await api("GET", `/api/player/widget/${pl.json.items[3].id}`, undefined, screen.auth)).json;
+  assert.deepEqual(rates.rows, [{ code: "USD", buy: 150.5, sell: 153 }]);
+});
+
+test("queue: Next, Back, Reset and counters from the Apps tab reach the screen", async () => {
+  const pl = (await api("POST", "/api/playlists", { name: "Queue", items: [{ kind: "queue", config: { prefix: "B", counters: ["Desk 1"] } }] }, admin)).json;
+  const screen = await pairScreen("Queue TV", { playlistId: pl.id });
+  const itemId = pl.items[0].id;
+  const queues = (await api("GET", "/api/queues", undefined, admin)).json;
+  assert.deepEqual(queues.find((q: { itemId: string }) => q.itemId === itemId).in, ["Queue"]);
+
+  await api("POST", `/api/queues/${itemId}`, { action: "next" }, admin);
+  let q = (await api("POST", `/api/queues/${itemId}`, { action: "next", counter: "Desk 1" }, admin)).json;
+  assert.deepEqual([q.label, q.counter, q.history], ["B-002", "Desk 1", ["B-001"]]);
+  q = (await api("POST", `/api/queues/${itemId}`, { action: "back" }, admin)).json;
+  assert.equal(q.label, "B-001");
+  assert.equal((await api("GET", `/api/player/widget/${itemId}`, undefined, screen.auth)).json.label, "B-001");
+  q = (await api("POST", `/api/queues/${itemId}`, { action: "set", number: 50 }, admin)).json;
+  assert.equal(q.label, "B-050");
+  assert.equal((await api("POST", `/api/queues/${itemId}`, { action: "jump" }, admin)).status, 400);
+  q = (await api("POST", `/api/queues/${itemId}`, { action: "reset" }, admin)).json;
+  assert.deepEqual([q.label, q.history], ["—", []]);
+});
+
+test("emergency announcement reaches targeted screens at once and ends", async () => {
+  const group = (await api("POST", "/api/groups", { name: "Alert group" }, admin)).json;
+  const inGroup = await pairScreen("Alert TV 1", { groupId: group.id });
+  const other = await pairScreen("Alert TV 2");
+  const key = (await api("GET", "/api/player/manifest", undefined, inGroup.auth)).json.changeKey;
+
+  const waiting = api("GET", `/api/player/wait?key=${encodeURIComponent(key)}`, undefined, inGroup.auth);
+  await new Promise((r) => setTimeout(r, 50));
+  const sent = await api("POST", "/api/alert", { title: "Fire drill", message: "Please leave by the nearest exit", style: "amber", groupIds: [group.id] }, admin);
+  assert.equal(sent.status, 201);
+  assert.equal((await waiting).json.changed, true, "screens are woken");
+
+  const man = (await api("GET", "/api/player/manifest", undefined, inGroup.auth)).json;
+  assert.deepEqual([man.alert.title, man.alert.style], ["Fire drill", "amber"]);
+  assert.equal((await api("GET", "/api/player/manifest", undefined, other.auth)).json.alert, null, "other groups aren't affected");
+  assert.equal(man.version, (await api("GET", "/api/player/manifest", undefined, inGroup.auth)).json.version);
+
+  assert.equal((await api("DELETE", "/api/alert", undefined, admin)).status, 204);
+  assert.equal((await api("GET", "/api/player/manifest", undefined, inGroup.auth)).json.alert, null);
+});
+
+test("background music and image transitions", async () => {
+  const form = new FormData();
+  form.append("files", new Blob([Buffer.from("ID3fake-mp3")], { type: "audio/mpeg" }), "song.mp3");
+  const [song] = await (await fetch(base + "/api/media", { method: "POST", headers: { authorization: admin }, body: form })).json();
+  assert.equal(song.type, "audio");
+  const music = (await api("POST", "/api/playlists", { name: "Music", items: [{ kind: "media", mediaId: song.id }] }, admin)).json;
+  const visuals = (await api("POST", "/api/playlists", { name: "Visuals", items: [{ kind: "text", text: "hi" }] }, admin)).json;
+  assert.equal((await api("PUT", `/api/playlists/${visuals.id}`, { transition: "spin" }, admin)).status, 400);
+  await api("PUT", `/api/playlists/${visuals.id}`, { transition: "zoom" }, admin);
+
+  const screen = await pairScreen("Music TV", { playlistId: visuals.id, musicPlaylistId: music.id });
+  const man = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json;
+  assert.deepEqual(man.music.mediaIds, [song.id]);
+  assert.ok(man.media.some((m: { mediaId: string; type: string }) => m.mediaId === song.id && m.type === "audio"), "the song is downloaded");
+  assert.equal(man.programs[0].zones[0].transition, "zoom");
+
+  // Audio in a visual playlist is skipped rather than shown.
+  await api("PUT", `/api/playlists/${visuals.id}`, { items: [{ kind: "text", text: "hi" }, { kind: "media", mediaId: song.id }] }, admin);
+  const zone = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json.programs[0].zones[0];
+  assert.equal(zone.items.length, 1);
+});
+
+test("calendar widget reads iCal events, including weekly repeats", async () => {
+  const { calendarEvents } = await import("../src/apps.js");
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const today = new Date();
+  const ymd = (d: Date) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+  const lastWeek = new Date(today.getTime() - 7 * 86_400_000);
+  const ics = [
+    "BEGIN:VCALENDAR",
+    "BEGIN:VEVENT", `DTSTART:${ymd(today)}T235800`, `DTEND:${ymd(today)}T235900`, "SUMMARY:Late meeting, room 2", "LOCATION:Room 2", "END:VEVENT",
+    "BEGIN:VEVENT", `DTSTART:${ymd(lastWeek)}T235800`, `DTEND:${ymd(lastWeek)}T235900`, "RRULE:FREQ=WEEKLY", "SUMMARY:Weekly stand-up", "END:VEVENT",
+    "BEGIN:VEVENT", `DTSTART;VALUE=DATE:${ymd(new Date(today.getTime() + 2 * 86_400_000))}`, "SUMMARY:Holiday", "END:VEVENT",
+    "BEGIN:VEVENT", "DTSTART:20200101T090000Z", "SUMMARY:Long ago", "END:VEVENT",
+    "END:VCALENDAR",
+  ].join("\r\n");
+  const srv = http.createServer((_req, res) => res.end(ics));
+  srv.listen(0);
+  await new Promise((r) => srv.once("listening", r));
+  try {
+    const events = await calendarEvents(`http://127.0.0.1:${(srv.address() as AddressInfo).port}/cal.ics`);
+    assert.deepEqual(events.map((e) => e.title).sort(), ["Holiday", "Late meeting, room 2", "Weekly stand-up"]);
+    assert.equal(events.find((e) => e.title === "Holiday")!.allDay, true);
+    assert.equal(events.find((e) => e.title.startsWith("Late"))!.location, "Room 2");
+  } finally {
+    srv.close();
+  }
+});

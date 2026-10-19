@@ -88,6 +88,30 @@ The screen downloads everything, then loops the playlist. When you edit a playli
 
 **On the screen**: press **Back** or **Menu** on the remote, or tap the screen five times quickly, to open the settings menu (change server, unpair, exit).
 
+## Widgets & apps
+
+In a playlist, **＋ Widgets & apps** (or a layout zone's **Shows** picker) adds:
+
+| Widget | What it shows |
+|---|---|
+| Weather | Current weather and a 5-day forecast for any city (Open-Meteo, no account needed) |
+| Ethiopian calendar | Today's Ethiopian date (e.g. ጥቅምት 9 ቀን 2019 ዓ.ም) and time, in Amharic or English, optionally in Ethiopian time, with the Gregorian date |
+| Exchange rates | Currencies to birr: automatic mid-market rates, or your own buying/selling rates |
+| Countdown | Days, hours, minutes and seconds to a date |
+| QR code | A scannable code for a link, menu, Wi-Fi details or Telegram channel |
+| Menu board | Sections of items and prices, laid out to fit; changes show at once |
+| Now serving | Queue numbers, called from the **Apps** tab on a computer or phone, with a chime |
+| Calendar agenda | Upcoming events from a Google or Outlook calendar's iCal link |
+| Facebook page / Instagram posts | A public page's posts, or chosen Instagram posts in turn |
+
+Also:
+
+- **Apps tab**: queue controls, and the **emergency announcement** that takes over every screen (or chosen groups) at once until you end it.
+- **PDF slides**: drop a PDF on the Media tab and each page becomes an image in a new playlist (PowerPoint: save as PDF first).
+- **Google Slides / Sheets / Power BI**: paste the link; it's turned into a full-screen view. Sheets need "anyone with the link can view"; Power BI needs "Publish to web".
+- **Image transitions**: each playlist can cut, fade, slide or slowly zoom (Ken Burns) between images.
+- **Background music**: upload MP3s, put them in a playlist, and choose it as a screen's or group's music (♪). Videos are muted while music plays.
+
 ## Videos and TVs
 
 Most TVs and TV boxes only play **H.264 video up to 1920×1080**. A 4K or H.265 (HEVC) video often shows a black screen. The Media tab shows each video's size and format:

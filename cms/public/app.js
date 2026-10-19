@@ -59,7 +59,9 @@ const fmtAgo = (iso) => {
 const preview = (m, { controls = false } = {}) =>
   m.type === "video"
     ? h("video", { src: fileUrl(m) + "#t=0.5", muted: true, preload: "metadata", controls })
-    : h("img", { src: fileUrl(m), alt: m.name, loading: "lazy" });
+    : m.type === "audio"
+      ? (controls ? h("audio", { src: fileUrl(m), preload: "none", controls: true }) : h("div", { class: "glyph" }, "♪ Music"))
+      : h("img", { src: fileUrl(m), alt: m.name, loading: "lazy" });
 
 // ---------- login ----------
 
@@ -100,6 +102,7 @@ document.querySelectorAll("header nav button").forEach((btn) =>
     if (btn.dataset.tab === "devices") loadDevices();
     if (btn.dataset.tab === "dashboard") loadDashboard();
     if (btn.dataset.tab === "reports") loadReports();
+    if (btn.dataset.tab === "apps") loadApps();
   }),
 );
 
@@ -233,7 +236,7 @@ function renderDashboard(d) {
   const total = d.media.images + d.media.videos;
   $("#storage").replaceChildren(total
     ? h("div", {},
-        h("div", { class: "stack" },
+        h("div", { class: "stackbar" },
           d.media.images ? h("span", { class: "seg s1", style: `flex:${d.media.images}`, "data-tip": `Images: ${fmtSize(d.media.images)}` }) : null,
           d.media.videos ? h("span", { class: "seg s2", style: `flex:${d.media.videos}`, "data-tip": `Videos: ${fmtSize(d.media.videos)}` }) : null),
         h("div", { class: "legend small-text" },
@@ -266,6 +269,215 @@ function renderDashboard(d) {
         h("span", {}, h("span", { class: `status-pill small ${e.type === "online" ? "good" : "critical"}` },
           h("span", { class: "status-icon" }, e.type === "online" ? "✓" : "!"), e.type === "online" ? "Back" : "Offline"), ` ${e.deviceName}`)))
     : [h("li", { class: "muted" }, "Screens going offline and coming back will show up here.")]));
+}
+
+// ---------- widgets & apps ----------
+
+const plusDays = (n) => {
+  const t = new Date(Date.now() + n * 86_400_000);
+  t.setMinutes(0, 0, 0);
+  return new Date(t.getTime() - t.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+};
+
+/** Every app widget: its name, icon, one-line description and starting settings. */
+const WIDGETS = {
+  weather: { icon: "⛅", name: "Weather", about: "Current weather and forecast for a city", config: () => ({ place: "Addis Ababa, Ethiopia", lat: 9.03, lon: 38.74, units: "c" }) },
+  ethcal: { icon: "📅", name: "Ethiopian calendar", about: "Today's Ethiopian date and time, in Amharic or English", config: () => ({ amharic: true, ethiopianTime: false, showGregorian: true }) },
+  rates: { icon: "💱", name: "Exchange rates", about: "Currencies to birr, automatic or your own buy/sell rates", config: () => ({ title: "Exchange rates", base: "ETB", manual: false, currencies: ["USD", "EUR", "GBP", "SAR", "AED", "CNY"], rows: [] }) },
+  countdown: { icon: "⏳", name: "Countdown", about: "Days, hours, minutes and seconds to a date", config: () => ({ title: "Grand opening", target: plusDays(7), doneText: "We're open!" }) },
+  qr: { icon: "▦", name: "QR code", about: "A code people scan for your website, menu or Wi-Fi", config: () => ({ text: location.origin, caption: "Scan me" }) },
+  menu: { icon: "🍽", name: "Menu board", about: "Items and prices in sections, updated instantly", config: () => ({ title: "Menu", currency: "ETB", accent: "#f59e0b", sections: [{ name: "Hot drinks", items: [{ name: "Macchiato", price: "45", note: "" }, { name: "Tea", price: "30", note: "" }] }] }) },
+  queue: { icon: "🔢", name: "Now serving", about: "Queue numbers you advance from the Apps tab", config: () => ({ title: "Now serving", prefix: "A", counters: [], accent: "#22c55e" }) },
+  calendar: { icon: "🗓", name: "Calendar agenda", about: "Today's events from a Google or Outlook calendar", config: () => ({ url: "", title: "Today", accent: "#2563eb" }) },
+  facebook: { icon: "f", name: "Facebook page", about: "Recent posts from a public Facebook page", config: () => ({ pageUrl: "https://www.facebook.com/" }) },
+  instagram: { icon: "◎", name: "Instagram posts", about: "Rotate through chosen Instagram posts", config: () => ({ posts: [], seconds: 20 }) },
+};
+
+function openWidgetPicker(onPick) {
+  openDialog("Widgets & apps",
+    h("div", { class: "widget-grid" }, Object.entries(WIDGETS).map(([kind, w]) =>
+      h("button", { class: "widget-card", onclick: () => {
+        $("#dialog").close();
+        onPick({ kind, color: "#ffffff", background: kind === "qr" ? "#ffffff" : "#111827", ...(kind === "qr" ? { color: "#111827" } : {}), config: w.config() });
+      } }, h("span", { class: "wicon" }, w.icon), h("strong", {}, w.name), h("span", { class: "small-text muted" }, w.about)))));
+}
+
+/** Google Slides/Sheets/Docs and Power BI links -> addresses that show nicely full-screen. */
+function googleEmbed(raw) {
+  const url = raw.trim();
+  if (!url || url === "https://") return null;
+  const id = url.match(/docs\.google\.com\/(presentation|spreadsheets|document)\/d\/(e\/)?([\w-]+)/);
+  if (id) {
+    const [, type, published, key] = id;
+    const base = `https://docs.google.com/${type}/d/${published ?? ""}${key}`;
+    if (type === "presentation") return `${base}/${published ? "embed" : "embed"}?start=true&loop=true&delayms=10000&rm=minimal`;
+    if (type === "spreadsheets") return published ? `${base}/pubhtml?widget=true&headers=false` : `${base}/htmlview?rm=minimal`;
+    return `${base}/${published ? "pub" : "preview"}`;
+  }
+  if (/powerbi\.com/i.test(url) && !/view\?r=/.test(url)) toast("Tip: in Power BI use File → Embed report → Publish to web, and paste that link.");
+  return url;
+}
+
+/** The settings form for one widget. Typing marks the playlist or layout unsaved; structural changes redraw. */
+function widgetEditor(it, soft, redraw) {
+  const c = it.config;
+  const set = (key) => (e) => { c[key] = e.target.type === "checkbox" ? e.target.checked : e.target.value; soft(); };
+  const input = (key, attrs = {}) => h("input", { value: c[key] ?? "", oninput: set(key), ...attrs });
+  const check = (key, label) => h("label", { class: "inline small-text" }, h("input", { type: "checkbox", checked: !!c[key], onchange: set(key) }), label);
+  const row = (...kids) => h("div", { class: "inline wrap wrow" }, ...kids);
+  const label = (text, el) => h("label", { class: "wlabel small-text" }, text, el);
+  switch (it.kind) {
+    case "weather":
+      return [row(h("span", {}, "📍 ", h("strong", {}, c.place)),
+        h("button", { class: "ghost small", type: "button", onclick: () => findCity(c, () => { soft(); redraw(); }) }, "Change city"),
+        h("select", { onchange: set("units") }, h("option", { value: "c", selected: c.units !== "f" }, "°C"), h("option", { value: "f", selected: c.units === "f" }, "°F")))];
+    case "ethcal":
+      return [row(check("amharic", "Amharic"), check("ethiopianTime", "Ethiopian time (ሰዓት)"), check("showGregorian", "Also show the Gregorian date"))];
+    case "rates": {
+      const out = [row(label("Title", input("title")), label("In", input("base", { maxlength: 3, class: "code" })),
+        h("select", { onchange: (e) => { c.manual = e.target.value === "manual"; if (c.manual && !c.rows.length) c.rows = c.currencies.map((code) => ({ code, buy: "", sell: "" })); soft(); redraw(); } },
+          h("option", { value: "auto", selected: !c.manual }, "Automatic rates (internet)"), h("option", { value: "manual", selected: c.manual }, "My own buying / selling rates")))];
+      if (!c.manual) {
+        out.push(h("div", { class: "currency-picks" }, Object.keys(CURRENCY_NAMES).filter((k) => k !== c.base).map((k) =>
+          h("label", { class: `chip${c.currencies.includes(k) ? " on" : ""}` }, h("input", { type: "checkbox", checked: c.currencies.includes(k),
+            onchange: (e) => { c.currencies = e.target.checked ? [...c.currencies, k] : c.currencies.filter((x) => x !== k); soft(); redraw(); } }), k))));
+      } else {
+        out.push(h("div", { class: "rate-rows" }, c.rows.map((r, i) => row(
+          h("input", { value: r.code, maxlength: 3, class: "code", placeholder: "USD", oninput: (e) => { r.code = e.target.value.toUpperCase(); soft(); } }),
+          label("Buy", h("input", { type: "number", step: "any", value: r.buy ?? "", oninput: (e) => { r.buy = e.target.value; soft(); } })),
+          label("Sell", h("input", { type: "number", step: "any", value: r.sell ?? "", oninput: (e) => { r.sell = e.target.value; soft(); } })),
+          h("button", { class: "danger small", type: "button", onclick: () => { c.rows.splice(i, 1); soft(); redraw(); } }, "✕"))),
+          h("button", { class: "ghost small", type: "button", onclick: () => { c.rows.push({ code: "", buy: "", sell: "" }); soft(); redraw(); } }, "+ Currency")));
+      }
+      return out;
+    }
+    case "countdown":
+      return [row(label("Title", input("title")), label("Until", input("target", { type: "datetime-local" }))), row(label("When it's over, show", input("doneText")))];
+    case "qr":
+      return [row(label("Link or text", input("text", { class: "grow" }))), row(label("Caption", input("caption")))];
+    case "menu":
+      return [row(label("Title", input("title")), label("Currency", input("currency", { class: "code" })),
+        h("label", { class: "inline small-text" }, "Accent", h("input", { type: "color", value: c.accent, oninput: set("accent") }))),
+        ...c.sections.map((s, si) => h("div", { class: "menu-section" },
+          row(h("input", { value: s.name, placeholder: "Section, e.g. Hot drinks", class: "grow", oninput: (e) => { s.name = e.target.value; soft(); } }),
+            h("button", { class: "danger small", type: "button", title: "Remove section", onclick: () => { c.sections.splice(si, 1); soft(); redraw(); } }, "✕")),
+          s.items.map((i, ii) => row(
+            h("input", { value: i.name, placeholder: "Item", class: "grow", oninput: (e) => { i.name = e.target.value; soft(); } }),
+            h("input", { value: i.price, placeholder: "Price", class: "price", oninput: (e) => { i.price = e.target.value; soft(); } }),
+            h("input", { value: i.note, placeholder: "Note (optional)", class: "grow", oninput: (e) => { i.note = e.target.value; soft(); } }),
+            h("button", { class: "danger small", type: "button", onclick: () => { s.items.splice(ii, 1); soft(); redraw(); } }, "✕"))),
+          h("button", { class: "ghost small", type: "button", onclick: () => { s.items.push({ name: "", price: "", note: "" }); soft(); redraw(); } }, "+ Item"))),
+        h("button", { class: "ghost small", type: "button", onclick: () => { c.sections.push({ name: "", items: [{ name: "", price: "", note: "" }] }); soft(); redraw(); } }, "+ Section")];
+    case "queue":
+      return [row(label("Title", input("title")), label("Number prefix", input("prefix", { maxlength: 4, class: "code" })),
+        h("label", { class: "inline small-text" }, "Number colour", h("input", { type: "color", value: c.accent, oninput: set("accent") }))),
+        row(label("Counters (optional, comma separated)", h("input", { value: (c.counters ?? []).join(", "), class: "grow",
+          oninput: (e) => { c.counters = e.target.value.split(",").map((x) => x.trim()).filter(Boolean); soft(); } }))),
+        h("div", { class: "small-text muted" }, "Call the next number from the Apps tab, on a computer or a phone.")];
+    case "calendar":
+      return [row(label("Calendar link (iCal)", input("url", { placeholder: "https://calendar.google.com/calendar/ical/…/basic.ics", class: "grow" }))),
+        row(label("Title", input("title")), h("button", { class: "ghost small", type: "button", onclick: async () => {
+          try { const r = await api("POST", "/api/widget-preview", it); toast(`${r.events.length} event${r.events.length === 1 ? "" : "s"} in the next 7 days`); }
+          catch (err) { toast(err.message); }
+        } }, "Test link")),
+        h("div", { class: "small-text muted" }, "Google Calendar: Settings → your calendar → \"Secret address in iCal format\". Outlook: Calendar settings → Shared calendars → Publish → ICS link.")];
+    case "facebook":
+      return [row(label("Facebook page link", input("pageUrl", { class: "grow" }))),
+        h("div", { class: "small-text muted" }, "A public page, e.g. https://www.facebook.com/YourBusiness. Facebook shows up to 500 pixels wide.")];
+    case "instagram":
+      return [h("textarea", { rows: 3, placeholder: "One post link per line, e.g. https://www.instagram.com/p/ABC123/", value: (c.posts ?? []).join("\n"),
+          oninput: (e) => { c.posts = e.target.value.split(/\s+/).filter(Boolean); soft(); } }),
+        row(label("Seconds per post", h("input", { type: "number", min: 5, value: c.seconds, oninput: (e) => { c.seconds = Number(e.target.value); soft(); } })))];
+    default:
+      return [];
+  }
+}
+
+const CURRENCY_NAMES = { USD: 1, EUR: 1, GBP: 1, SAR: 1, AED: 1, CNY: 1, JPY: 1, CHF: 1, CAD: 1, AUD: 1, KES: 1, INR: 1, TRY: 1, KWD: 1, QAR: 1, ZAR: 1, SEK: 1, NOK: 1, DKK: 1, DJF: 1, EGP: 1, ETB: 1 };
+
+async function findCity(c, done) {
+  const q = prompt("City name", c.place.split(",")[0]);
+  if (!q) return;
+  try {
+    const { places } = await api("GET", `/api/geocode?q=${encodeURIComponent(q)}`);
+    if (!places.length) { toast("No city found with that name"); return; }
+    openDialog("Pick the city", h("ul", { class: "plain" }, places.map((p) => h("li", {}, h("button", { class: "ghost", onclick: () => {
+      Object.assign(c, { place: [p.name, p.country].filter(Boolean).join(", "), lat: p.lat, lon: p.lon });
+      $("#dialog").close();
+      done();
+    } }, [p.name, p.admin, p.country].filter(Boolean).join(", "))))));
+  } catch (err) { toast(err.message); }
+}
+
+/** Background music for a screen or group: any playlist that contains audio files. */
+function musicSelect(x, url) {
+  const musical = state.playlists.filter((p) => p.items.some((i) => i.kind === "media" && state.media.find((m) => m.id === i.mediaId)?.type === "audio"));
+  if (!musical.length && !x.musicPlaylistId) return null;
+  return h("select", { class: "music-select", title: "Background music", onchange: async (e) => {
+    await api("PATCH", url, { musicPlaylistId: e.target.value || null });
+    toast("Saved");
+    Promise.all([loadDevices(), loadGroups()]);
+  } }, h("option", { value: "" }, "♪ No music"), musical.map((p) => h("option", { value: p.id, selected: p.id === x.musicPlaylistId }, `♪ ${p.name}`)));
+}
+
+// ---------- Apps tab: emergency announcement + queue control ----------
+
+async function loadApps() {
+  const [alert, queues] = await Promise.all([api("GET", "/api/alert"), api("GET", "/api/queues")]);
+  renderAlertCard(alert);
+  renderQueues(queues);
+}
+
+function renderAlertCard(alert) {
+  const card = $("#alert-card");
+  if (alert) {
+    const target = alert.groupIds.length ? alert.groupIds.map((g) => state.groups.find((x) => x.id === g)?.name ?? "?").join(", ") : "all screens";
+    card.replaceChildren(
+      h("h2", {}, "🚨 Emergency announcement"),
+      h("div", { class: `alert-live ${alert.style}` }, h("strong", {}, alert.title), alert.message ? h("div", {}, alert.message) : null),
+      h("p", { class: "small-text muted" }, `Showing on ${target} since ${fmtTime(alert.startedAt)}${alert.endsAt ? `, until ${fmtTime(alert.endsAt)}` : ""}.`),
+      h("button", { class: "big-btn", onclick: async () => { await api("DELETE", "/api/alert"); toast("Announcement ended. Screens are back to normal."); loadApps(); } }, "End announcement"));
+    return;
+  }
+  const title = h("input", { placeholder: "Title, e.g. Fire drill", maxlength: 80 });
+  const message = h("textarea", { rows: 3, placeholder: "Message, e.g. Please leave the building by the nearest exit." });
+  const style = h("select", {}, [["red", "Red: emergency"], ["amber", "Amber: warning"], ["blue", "Blue: information"], ["green", "Green: all clear"]].map(([v, t]) => h("option", { value: v }, t)));
+  const minutes = h("select", {}, [["", "Until I end it"], ["15", "For 15 minutes"], ["30", "For 30 minutes"], ["60", "For 1 hour"], ["120", "For 2 hours"]].map(([v, t]) => h("option", { value: v }, t)));
+  const groups = state.groups.map((g) => ({ g, cb: h("input", { type: "checkbox" }) }));
+  card.replaceChildren(
+    h("h2", {}, "🚨 Emergency announcement"),
+    h("p", { class: "small-text muted" }, "Takes over the whole screen at once on every screen (or chosen groups), until you end it."),
+    h("div", { class: "stack" }, title, message, h("div", { class: "inline wrap" }, style, minutes),
+      groups.length ? h("div", { class: "inline wrap small-text" }, "Only for groups:", groups.map(({ g, cb }) => h("label", { class: "inline" }, cb, g.name))) : null,
+      h("button", { class: "big-btn danger-fill", onclick: async () => {
+        if (!title.value.trim()) { toast("Give it a title"); return; }
+        if (!confirm("Show this on the screens now?")) return;
+        try {
+          await api("POST", "/api/alert", { title: title.value, message: message.value, style: style.value, minutes: minutes.value || null,
+            groupIds: groups.filter(({ cb }) => cb.checked).map(({ g }) => g.id) });
+          toast("Showing on screens now");
+          loadApps();
+        } catch (err) { toast(err.message); }
+      } }, "Show on screens now")));
+}
+
+function renderQueues(queues) {
+  const card = $("#queue-card");
+  if (!queues.length) {
+    card.replaceChildren(h("h2", {}, "🔢 Now serving"), h("p", { class: "muted" },
+      "Add a \"Now serving\" widget to a playlist or layout zone (＋ Widgets & apps), and its controls appear here."));
+    return;
+  }
+  const act = (q, body) => api("POST", `/api/queues/${q.itemId}`, body).then(() => loadApps()).catch((err) => toast(err.message));
+  card.replaceChildren(h("h2", {}, "🔢 Now serving"), ...queues.map((q) => h("div", { class: "queue" },
+    h("div", { class: "queue-head" }, h("strong", {}, q.title || "Queue"), h("span", { class: "small-text muted" }, q.in.join(", "))),
+    h("div", { class: "queue-num" }, q.number ? q.label : "Not started", q.counter ? h("span", {}, ` → ${q.counter}`) : null),
+    h("div", { class: "queue-btns" },
+      (q.counters.length ? q.counters : [""]).map((ctr) => h("button", { class: "big-btn", onclick: () => act(q, { action: "next", counter: ctr }) },
+        ctr ? `Next → ${ctr}` : "Next number")),
+      h("button", { class: "ghost", onclick: () => act(q, { action: "back" }) }, "◀ Back"),
+      h("button", { class: "ghost", onclick: () => { const n = prompt("Set the number to", q.number); if (n != null) act(q, { action: "set", number: n }); } }, "Set…"),
+      h("button", { class: "danger", onclick: () => { if (confirm("Start again from zero?")) act(q, { action: "reset" }); } }, "Reset")))));
 }
 
 // ---------- proof-of-play reports ----------
@@ -491,7 +703,10 @@ async function deleteMedia(m) {
   toast("Deleted");
 }
 
-function uploadFiles(files) {
+function uploadFiles(all) {
+  const pdfs = all.filter((f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name));
+  const files = all.filter((f) => !pdfs.includes(f));
+  for (const pdf of pdfs) importPdf(pdf).catch((err) => toast(`${pdf.name}: ${err.message}`));
   if (!files.length) return;
   const form = new FormData();
   for (const f of files) form.append("files", f);
@@ -515,6 +730,45 @@ function uploadFiles(files) {
   };
   xhr.onerror = () => { bar.hidden = true; toast("Upload failed"); };
   xhr.send(form);
+}
+
+/**
+ * Turns each page of a PDF into a picture, in this browser (no software needed on the CMS computer),
+ * uploads them, and makes a playlist of them. PowerPoint files: save as PDF first.
+ */
+async function importPdf(file) {
+  toast(`Reading ${file.name}…`);
+  const pdfjs = await import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  const base = file.name.replace(/\.pdf$/i, "");
+  const bar = $("#upload-progress");
+  bar.hidden = false;
+  const ids = [];
+  try {
+    for (let n = 1; n <= doc.numPages; n++) {
+      bar.value = ((n - 1) / doc.numPages) * 100;
+      const pageObj = await doc.getPage(n);
+      const unscaled = pageObj.getViewport({ scale: 1 });
+      const viewport = pageObj.getViewport({ scale: Math.min(4, 1920 / Math.max(unscaled.width, unscaled.height * 16 / 9)) });
+      const canvas = h("canvas", { width: Math.round(viewport.width), height: Math.round(viewport.height) });
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await pageObj.render({ canvasContext: ctx, viewport }).promise;
+      const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
+      const form = new FormData();
+      form.append("files", new File([blob], `${base} - page ${n}.jpg`, { type: "image/jpeg" }));
+      const res = await fetch("/api/media", { method: "POST", headers: { authorization: `Bearer ${state.token}` }, body: form });
+      if (!res.ok) throw new Error("Upload failed");
+      ids.push((await res.json())[0].id);
+    }
+  } finally {
+    bar.hidden = true;
+  }
+  const pl = await api("POST", "/api/playlists", { name: base, items: ids.map((mediaId) => ({ kind: "media", mediaId, duration: 10 })) });
+  await Promise.all([loadMedia(), loadPlaylists()]);
+  toast(`Made ${ids.length} slide${ids.length === 1 ? "" : "s"} and the playlist "${pl.name}"`);
 }
 
 const dz = $("#dropzone");
@@ -544,7 +798,7 @@ function selectPlaylist(id) {
   if (state.draft?.dirty && !confirm("Discard unsaved changes?")) return;
   state.selectedPlaylist = id;
   const p = state.playlists.find((x) => x.id === id);
-  state.draft = p ? { ...p, items: p.items.map((i) => ({ ...i })), dirty: false } : null;
+  state.draft = p ? { ...p, items: structuredClone(p.items), dirty: false } : null;
   renderPlaylistList();
   renderEditor();
 }
@@ -570,6 +824,10 @@ function renderEditor() {
       saveBtn,
       h("button", { class: "danger", onclick: deletePlaylist }, "Delete"),
     ),
+    h("label", { class: "inline small-text transition-pick" }, "Image transition",
+      h("select", { onchange: (e) => { d.transition = e.target.value; soft(); } },
+        [["none", "None (cut)"], ["fade", "Fade"], ["slide", "Slide"], ["zoom", "Zoom (Ken Burns)"]].map(([v, t]) =>
+          h("option", { value: v, selected: (d.transition ?? "none") === v }, t)))),
     h("p", { class: "muted" },
       `${d.items.length} item${d.items.length === 1 ? "" : "s"} · about ${total}s${hasVideo ? " + videos" : ""}`,
       d.dirty ? " · unsaved changes" : ""),
@@ -590,6 +848,11 @@ function renderEditor() {
     ))),
     h("h2", {}, "Add"),
     h("div", { class: "inline wrap add-kinds" },
+      h("button", { onclick: () => openWidgetPicker((it) => { d.items.push({ duration: 30, ...it }); touch(); }) }, "＋ Widgets & apps"),
+      h("button", { class: "ghost", onclick: () => {
+        const url = googleEmbed(prompt("Google Slides, Google Sheets or Power BI link", "https://") ?? "");
+        if (url) { d.items.push({ kind: "web", url, duration: 60 }); touch(); }
+      } }, "+ Google Slides / Sheets / Power BI"),
       h("button", { class: "ghost", onclick: () => {
         d.items.push({ kind: "text", text: "Your message here", color: "#ffffff", background: "#1f2937", scroll: false, duration: 10 });
         touch();
@@ -640,6 +903,7 @@ function itemThumb(it, mediaById) {
       it.kind === "clock" ? `🕒 ${it.clocks.length} cit${it.clocks.length === 1 ? "y" : "ies"}` : it.mode === "list" ? "NEWS list" : "NEWS ›");
   }
   if (it.kind === "x") return h("div", { class: "glyph", style: "background:#000" }, "𝕏 posts");
+  if (WIDGETS[it.kind]) return h("div", { class: "glyph", style: `background:${it.background};color:${it.color}` }, `${WIDGETS[it.kind].icon} ${WIDGETS[it.kind].name}`);
   return h("div", { class: "glyph" }, it.kind === "stream" ? "LIVE" : channelIdOf(it.url) ? "▶ LIVE TV" : isYoutube(it.url) ? "▶ YouTube" : "WEB");
 }
 
@@ -767,6 +1031,13 @@ function itemFields(it, mediaById, soft, rerender = renderEditor) {
           ? "Live stream (HLS .m3u8 or a video URL). Plays nonstop if it's the only item."
           : isYoutube(it.url) ? "YouTube video, playlist or live stream. Needs internet on the screen." : "Web page. Needs internet on the screen."),
       ];
+    case "weather": case "ethcal": case "rates": case "countdown": case "qr":
+    case "menu": case "queue": case "calendar": case "facebook": case "instagram": {
+      const box = h("div", { class: "fields" });
+      const draw = () => box.replaceChildren(...[widgetEditor(it, soft, draw), h("div", { class: "inline wrap small-text" }, colorInputs(it, soft))].flat());
+      draw();
+      return box;
+    }
     case "x":
       return [
         h("input", { value: it.handle ? `@${String(it.handle).replace(/^@/, "")}` : "", placeholder: "@account, e.g. @dwnews",
@@ -830,7 +1101,7 @@ function itemDates(it, soft) {
 async function savePlaylist() {
   const d = state.draft;
   try {
-    await api("PUT", `/api/playlists/${d.id}`, { name: d.name, items: d.items });
+    await api("PUT", `/api/playlists/${d.id}`, { name: d.name, items: d.items, transition: d.transition ?? "none" });
     d.dirty = false;
     await loadPlaylists();
     selectPlaylist(d.id);
@@ -904,6 +1175,16 @@ const ZONE_SOURCES = {
   clock: "World clock",
   text: "Text or ticker",
   web: "Web page",
+  weather: "Weather",
+  ethcal: "Ethiopian calendar & time",
+  rates: "Exchange rates",
+  countdown: "Countdown",
+  qr: "QR code",
+  menu: "Menu / price board",
+  queue: "Now serving (queue)",
+  calendar: "Calendar agenda",
+  facebook: "Facebook page",
+  instagram: "Instagram posts",
 };
 
 /** Well-known news channels that stream live on YouTube. A channel may pause its stream or block embedding. */
@@ -931,6 +1212,7 @@ function zoneSource(z) {
 
 function newZoneItem(source, z) {
   const base = { duration: 30, color: "#ffffff", background: "#111827" };
+  if (WIDGETS[source]) return { ...base, kind: source, config: WIDGETS[source].config() };
   switch (source) {
     case "youtube": return { ...base, kind: "web", url: "", sound: true };
     case "channel": return { ...base, kind: "web", url: channelUrl(Object.values(NEWS_CHANNELS)[0]), sound: true };
@@ -1267,6 +1549,7 @@ function connectLive() {
       if (!$("#tab-dashboard").hidden) loadDashboard().catch(() => {});
       if (!$("#tab-media").hidden) loadMedia().catch(() => {});
       if (!$("#tab-reports").hidden) loadReports().catch(() => {});
+      if (!$("#tab-apps").hidden) loadApps().catch(() => {});
     }, 250);
   };
 }
@@ -1295,7 +1578,7 @@ function renderDevices() {
             toast("Saved. The screen switches within 30 seconds.");
             loadDevices();
           } }, contentOptions(contentValue(d))),
-          scheduleSummary(d)]),
+          scheduleSummary(d), musicSelect(d, `/api/devices/${d.id}`)]),
     h("td", { class: "small-text" }, [d.info?.manufacturer, d.info?.model].filter(Boolean).join(" ") || "—",
       d.info?.appVersion ? h("div", {}, `App ${d.info.appVersion}`) : ""),
     h("td", {}, h("div", { class: "inline" },
@@ -1341,7 +1624,7 @@ function renderGroups() {
           toast("Saved. Screens in the group switch within 30 seconds.");
           loadGroups();
         } }, contentOptions(contentValue(g))),
-        scheduleSummary(g)),
+        scheduleSummary(g), musicSelect(g, `/api/groups/${g.id}`)),
       h("div", { class: "inline wrap" },
         h("button", { class: "ghost small", disabled: !members.length, onclick: () => groupCommand(g, "refresh") }, "Refresh all"),
         h("button", { class: "ghost small", disabled: !members.length, onclick: () => groupCommand(g, "screenshot") }, "Screenshot all"),
