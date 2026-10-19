@@ -66,13 +66,29 @@ export interface Layout {
   updatedAt: string;
 }
 
+/**
+ * Shows a playlist or layout on some days between two times (24h "HH:MM", on the screen's own clock).
+ * An end at or before the start runs past midnight; equal start and end means all day.
+ */
+export interface ScheduleRule {
+  id: string;
+  /** 0 = Sunday ... 6 = Saturday */
+  days: number[];
+  start: string;
+  end: string;
+  playlistId: string | null;
+  layoutId: string | null;
+}
+
 export interface Device {
   id: string;
   name: string;
   token: string;
-  /** What the screen shows: a layout if set, otherwise a fullscreen playlist. */
+  /** What the screen shows by default: a layout if set, otherwise a fullscreen playlist. */
   playlistId: string | null;
   layoutId: string | null;
+  /** Time slots that override the default. The first matching one wins. */
+  schedule: ScheduleRule[];
   pairedAt: string;
   lastSeen: string | null;
   info: Record<string, string>;
@@ -111,7 +127,10 @@ export class Store {
       : empty();
     // Fill in fields added after a db.json was first written.
     for (const p of this.data.playlists) for (const it of p.items) it.kind ??= "media";
-    for (const d of this.data.devices) d.layoutId ??= null;
+    for (const d of this.data.devices) {
+      d.layoutId ??= null;
+      d.schedule ??= [];
+    }
   }
 
   save() {

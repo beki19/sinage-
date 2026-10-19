@@ -3,6 +3,7 @@ package com.signage.player
 import android.graphics.Color
 import org.json.JSONObject
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Locale
 
 data class Registration(val code: String, val pollToken: String)
@@ -49,15 +50,36 @@ data class Zone(val id: String, val x: Float, val y: Float, val w: Float, val h:
 /** Everything that fills the screen at once: a playlist (one zone) or a layout (several). */
 data class Program(val id: String, val name: String, val zones: List<Zone>)
 
+/**
+ * Shows [program] on [days] (0 = Sunday) from [start] to [end], in minutes after midnight on this device's clock.
+ * An end at or before the start runs past midnight; equal start and end means all day. Mirrors ruleMatches in the CMS.
+ */
+data class ScheduleRule(val days: Set<Int>, val start: Int, val end: Int, val program: String) {
+    fun matches(now: Calendar): Boolean {
+        val t = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+        val day = now.get(Calendar.DAY_OF_WEEK) - 1 // Calendar.SUNDAY is 1
+        return when {
+            start == end -> day in days
+            start < end -> day in days && t >= start && t < end
+            else -> (day in days && t >= start) || ((day + 6) % 7 in days && t < end)
+        }
+    }
+}
+
 data class Manifest(
     val deviceName: String,
     val version: String,
     val media: List<MediaFile>,
     val programs: Map<String, Program>,
     val defaultProgram: String?,
+    val schedule: List<ScheduleRule>,
     val pollSeconds: Int,
 ) {
-    fun activeProgram(): Program? = defaultProgram?.let { programs[it] }
+    /** The first matching time slot wins; otherwise the default. */
+    fun activeProgram(now: Calendar = Calendar.getInstance()): Program? {
+        val id = schedule.firstOrNull { it.program in programs && it.matches(now) }?.program ?: defaultProgram
+        return id?.let { programs[it] }
+    }
 
     companion object {
         fun parse(json: String): Manifest {
@@ -88,8 +110,26 @@ data class Manifest(
                 media = media,
                 programs = programs.associateBy { it.id },
                 defaultProgram = defaultProgram,
+                schedule = parseSchedule(o),
                 pollSeconds = o.optInt("pollSeconds", 30).coerceIn(5, 3600),
             )
+        }
+
+        private fun parseSchedule(o: JSONObject): List<ScheduleRule> {
+            val arr = o.optJSONArray("schedule") ?: return emptyList()
+            fun minutes(s: String) = s.split(":").let { it[0].toInt() * 60 + it[1].toInt() }
+            return (0 until arr.length()).mapNotNull { i ->
+                runCatching {
+                    val r = arr.getJSONObject(i)
+                    val days = r.getJSONArray("days")
+                    ScheduleRule(
+                        days = (0 until days.length()).map { days.getInt(it) }.toSet(),
+                        start = minutes(r.getString("start")),
+                        end = minutes(r.getString("end")),
+                        program = r.getString("program"),
+                    )
+                }.getOrNull()
+            }
         }
 
         private fun parseMedia(m: JSONObject) = MediaFile(

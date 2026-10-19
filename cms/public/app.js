@@ -500,14 +500,20 @@ function renderDevices() {
   rows.replaceChildren(...state.devices.map((d) => h("tr", {},
     h("td", {}, h("strong", {}, d.name), h("div", { class: "small-text" }, `Paired ${new Date(d.pairedAt).toLocaleDateString()}`)),
     h("td", {}, h("span", { class: `dot ${d.online ? "on" : ""}` }), d.online ? "Online" : `Offline · ${fmtAgo(d.lastSeen)}`),
-    h("td", {}, h("select", { onchange: async (e) => {
-      await api("PATCH", `/api/devices/${d.id}`, contentBody(e.target.value));
-      toast("Saved. The screen switches within 30 seconds.");
-      loadDevices();
-    } }, contentOptions(contentValue(d)))),
+    h("td", {},
+      h("select", { onchange: async (e) => {
+        await api("PATCH", `/api/devices/${d.id}`, contentBody(e.target.value));
+        toast("Saved. The screen switches within 30 seconds.");
+        loadDevices();
+      } }, contentOptions(contentValue(d))),
+      scheduleSummary(d)),
     h("td", { class: "small-text" }, [d.info?.manufacturer, d.info?.model].filter(Boolean).join(" ") || "—",
       d.info?.appVersion ? h("div", {}, `App ${d.info.appVersion}`) : ""),
     h("td", {}, h("div", { class: "inline" },
+      h("button", { class: "ghost small", onclick: () => openScheduleEditor(`Schedule for ${d.name}`, d, async (schedule) => {
+        await api("PATCH", `/api/devices/${d.id}`, { schedule });
+        await loadDevices();
+      }) }, "Schedule"),
       h("button", { class: "ghost small", onclick: async () => {
         const name = prompt("Screen name", d.name);
         if (name) { await api("PATCH", `/api/devices/${d.id}`, { name }); loadDevices(); }
@@ -519,6 +525,64 @@ function renderDevices() {
       } }, "Remove"),
     )),
   )));
+}
+
+function scheduleSummary(x) {
+  if (!x.schedule?.length) return null;
+  const n = x.schedule.length;
+  return h("div", { class: "small-text" }, `${n} time slot${n === 1 ? "" : "s"}`, x.nowShowing ? ` · now: ${x.nowShowing}` : "");
+}
+
+// ---------- dialogs + schedule editor ----------
+
+function openDialog(title, ...body) {
+  const dlg = $("#dialog");
+  dlg.replaceChildren(
+    h("div", { class: "dialog-head" }, h("h2", {}, title), h("button", { class: "ghost small", title: "Close", onclick: () => dlg.close() }, "✕")),
+    ...body,
+  );
+  if (!dlg.open) dlg.showModal();
+  return dlg;
+}
+
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEK = [1, 2, 3, 4, 5, 6, 0];
+
+/** Edits target.schedule in a dialog; save(schedule) sends it to the server. */
+function openScheduleEditor(title, target, save) {
+  const rules = (target.schedule ?? []).map((r) => ({ id: r.id, days: [...r.days], start: r.start, end: r.end, content: contentValue(r) }));
+  const render = () => openDialog(title,
+    h("p", { class: "muted small-text" },
+      "Outside these time slots the screen shows its default content. Times use each screen's own clock. ",
+      "A slot that ends before it starts runs past midnight. If slots overlap, the first one wins."),
+    rules.length
+      ? h("div", { class: "rules" }, rules.map((r, i) => h("div", { class: "rule" },
+          h("div", { class: "days" }, WEEK.map((day) => h("label", { class: `day${r.days.includes(day) ? " on" : ""}` },
+            h("input", { type: "checkbox", checked: r.days.includes(day),
+              onchange: (e) => { r.days = e.target.checked ? [...r.days, day] : r.days.filter((x) => x !== day); render(); } }),
+            DAY_NAMES[day]))),
+          h("div", { class: "inline wrap" },
+            h("input", { type: "time", value: r.start, onchange: (e) => (r.start = e.target.value) }),
+            h("span", { class: "muted" }, "to"),
+            h("input", { type: "time", value: r.end, onchange: (e) => (r.end = e.target.value) }),
+            h("select", { onchange: (e) => (r.content = e.target.value) }, contentOptions(r.content)),
+            h("button", { class: "danger small", title: "Remove time slot", onclick: () => { rules.splice(i, 1); render(); } }, "✕"),
+          ),
+        )))
+      : h("p", { class: "muted" }, "No time slots: the screen always shows its default content."),
+    h("div", { class: "inline wrap dialog-actions" },
+      h("button", { class: "ghost", onclick: () => { rules.push({ days: [1, 2, 3, 4, 5], start: "08:00", end: "17:00", content: "" }); render(); } }, "+ Add time slot"),
+      h("span", { class: "spacer" }),
+      h("button", { onclick: async () => {
+        try {
+          await save(rules.map(({ id, days, start, end, content }) => ({ id, days, start, end, ...contentBody(content) })));
+          $("#dialog").close();
+          toast("Schedule saved. Screens update within 30 seconds.");
+        } catch (err) { toast(err.message); }
+      } }, "Save schedule"),
+    ),
+  );
+  render();
 }
 
 $("#pair-form").addEventListener("submit", async (e) => {

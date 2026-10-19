@@ -4,7 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
-import { Store, type Device, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem } from "./store.js";
+import {
+  Store, type Device, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
+} from "./store.js";
 
 export interface AppOptions {
   dataDir: string;
@@ -25,6 +27,20 @@ function pairingCode(): string {
   let code = "";
   for (const b of crypto.randomBytes(6)) code += CODE_ALPHABET[b % CODE_ALPHABET.length];
   return code;
+}
+
+const minutes = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+
+/** Does [rule] cover this moment? Mirrors ScheduleRule.matches in the Android player. */
+export function ruleMatches(rule: Pick<ScheduleRule, "days" | "start" | "end">, at: Date): boolean {
+  const t = at.getHours() * 60 + at.getMinutes();
+  const day = at.getDay();
+  const start = minutes(rule.start);
+  const end = minutes(rule.end);
+  if (start === end) return rule.days.includes(day);
+  if (start < end) return rule.days.includes(day) && t >= start && t < end;
+  // Runs past midnight: the evening of a listed day, or the early hours after one.
+  return (rule.days.includes(day) && t >= start) || (rule.days.includes((day + 6) % 7) && t < end);
 }
 
 function sameSecret(a: string, b: string): boolean {
@@ -122,10 +138,14 @@ export function createApp(opts: AppOptions) {
     return v.trim().slice(0, max);
   };
 
-  const publicDevice = ({ token: _t, ...rest }: Device) => ({
-    ...rest,
-    online: rest.lastSeen ? Date.now() - Date.parse(rest.lastSeen) < 2 * 60 * 1000 : false,
-  });
+  const publicDevice = (device: Device) => {
+    const { token: _t, ...rest } = device;
+    return {
+      ...rest,
+      online: rest.lastSeen ? Date.now() - Date.parse(rest.lastSeen) < 2 * 60 * 1000 : false,
+      nowShowing: refName(activeRef(assignmentOf(device))),
+    };
+  };
 
   const color = (v: unknown, fallback: string): string => {
     if (v == null || v === "") return fallback;
@@ -208,15 +228,39 @@ export function createApp(opts: AppOptions) {
     });
   };
 
-  /** Reads playlistId / layoutId from a request body onto a screen. */
-  const applyContent = (target: { playlistId: string | null; layoutId: string | null }, body: Record<string, unknown> | undefined) => {
+  const parseSchedule = (raw: unknown): ScheduleRule[] => {
+    if (!Array.isArray(raw) || raw.length > 50) throw new HttpError(400, "schedule must be a list of up to 50 time slots");
+    const hhmm = (v: unknown, field: string) => {
+      if (typeof v !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) throw new HttpError(400, `${field} must be a time like 08:30`);
+      return v;
+    };
+    return raw.map((r, i) => {
+      const days = Array.isArray(r?.days) ? [...new Set<number>(r.days.map(Number))].filter((d) => Number.isInteger(d) && d >= 0 && d <= 6).sort() : [];
+      if (!days.length) throw new HttpError(400, `Time slot ${i + 1} needs at least one day`);
+      const rule: ScheduleRule = {
+        id: typeof r?.id === "string" ? r.id : id(),
+        days,
+        start: hhmm(r?.start, `Time slot ${i + 1} start`),
+        end: hhmm(r?.end, `Time slot ${i + 1} end`),
+        playlistId: null,
+        layoutId: null,
+      };
+      applyContent(rule, r);
+      if (!rule.playlistId && !rule.layoutId) throw new HttpError(400, `Time slot ${i + 1} needs a playlist or layout`);
+      return rule;
+    });
+  };
+
+  /** Reads playlistId / layoutId (and schedule, where the target has one) from a request body. */
+  function applyContent(target: { playlistId: string | null; layoutId: string | null; schedule?: ScheduleRule[] }, body: Record<string, unknown> | undefined) {
     if (body?.playlistId !== undefined) {
       target.playlistId = body.playlistId ? findOr404(db.playlists, String(body.playlistId), "Playlist").id : null;
     }
     if (body?.layoutId !== undefined) {
       target.layoutId = body.layoutId ? findOr404(db.layouts, String(body.layoutId), "Layout").id : null;
     }
-  };
+    if (target.schedule && body?.schedule !== undefined) target.schedule = parseSchedule(body.schedule);
+  }
 
   /** "https://youtu.be/abc" or "https://www.youtube.com/watch?v=abc" -> "abc" */
   const youtubeId = (url: string): string | null => {
@@ -289,16 +333,41 @@ export function createApp(opts: AppOptions) {
     return playlistById(biggest?.playlistId ?? null);
   };
 
+  type Assignment = { playlistId: string | null; layoutId: string | null; schedule: ScheduleRule[] };
+
+  /** Where a screen takes its content from. */
+  const assignmentOf = (device: Device): Assignment => device;
+
+  /** Time slots whose playlist or layout still exists, pointing at program ids. */
+  const scheduleRefs = (a: Assignment) => a.schedule.flatMap((r) => {
+    const program = contentRef(r);
+    return program ? [{ days: r.days, start: r.start, end: r.end, program }] : [];
+  });
+
+  /** What a screen should show at [at] by the server's clock. Screens decide by their own clock. */
+  const activeRef = (a: Assignment, at = new Date()) =>
+    scheduleRefs(a).find((r) => ruleMatches(r, at))?.program ?? contentRef(a);
+
+  const refName = (ref: string | null) => {
+    if (!ref) return null;
+    const [kind, refId] = ref.split(":");
+    return (kind === "layout" ? db.layouts.find((l) => l.id === refId) : playlistById(refId))?.name ?? null;
+  };
+
   const manifestFor = (device: Device) => {
-    const defaultProgram = contentRef(device);
-    const programs = defaultProgram ? [programFor(defaultProgram)] : [];
+    const a = assignmentOf(device);
+    const defaultProgram = contentRef(a);
+    const schedule = scheduleRefs(a);
+    const refs = [...new Set([defaultProgram, ...schedule.map((r) => r.program)])].filter((r): r is string => !!r);
+    const programs = refs.map(programFor);
     const mediaIds = new Set(programs.flatMap((p) => p.zones.flatMap((z) => z.items.flatMap((i) => (i.mediaId ? [i.mediaId] : [])))));
     const media = db.media.filter((m) => mediaIds.has(m.id)).map(mediaFile);
+    // Players from version 1.0 only understand `items`: images and videos of one playlist, picked by the server's clock.
+    const legacyRef = activeRef(a);
     const version = crypto.createHash("sha256")
-      .update(JSON.stringify([device.name, programs, defaultProgram, media]))
+      .update(JSON.stringify([device.name, programs, defaultProgram, schedule, media, legacyRef]))
       .digest("hex").slice(0, 16);
-    // Players from version 1.0 only understand `items`: images and videos of the main playlist.
-    const playlist = legacyPlaylist(defaultProgram);
+    const playlist = legacyPlaylist(legacyRef);
     const legacyItems = (playlist?.items ?? []).flatMap((it) => {
       const m = it.kind === "media" ? db.media.find((x) => x.id === it.mediaId) : undefined;
       return m ? [{ id: it.id, ...mediaFile(m), duration: it.duration }] : [];
@@ -312,6 +381,7 @@ export function createApp(opts: AppOptions) {
       media,
       programs,
       defaultProgram,
+      schedule,
       pollSeconds: 30,
     };
   };
@@ -429,7 +499,10 @@ export function createApp(opts: AppOptions) {
   app.delete("/api/playlists/:id", requireAdmin, route((req, res) => {
     const p = findOr404(db.playlists, String(req.params.id), "Playlist");
     db.playlists = db.playlists.filter((x) => x !== p);
-    for (const d of db.devices) if (d.playlistId === p.id) d.playlistId = null;
+    for (const d of db.devices) {
+      if (d.playlistId === p.id) d.playlistId = null;
+      d.schedule = d.schedule.filter((r) => r.playlistId !== p.id);
+    }
     for (const l of db.layouts) for (const z of l.zones) if (z.playlistId === p.id) z.playlistId = null;
     store.save();
     res.status(204).end();
@@ -465,7 +538,10 @@ export function createApp(opts: AppOptions) {
   app.delete("/api/layouts/:id", requireAdmin, route((req, res) => {
     const l = findOr404(db.layouts, String(req.params.id), "Layout");
     db.layouts = db.layouts.filter((x) => x !== l);
-    for (const d of db.devices) if (d.layoutId === l.id) d.layoutId = null;
+    for (const d of db.devices) {
+      if (d.layoutId === l.id) d.layoutId = null;
+      d.schedule = d.schedule.filter((r) => r.layoutId !== l.id);
+    }
     store.save();
     res.status(204).end();
   }));
@@ -487,6 +563,7 @@ export function createApp(opts: AppOptions) {
       token: secret(),
       playlistId: null,
       layoutId: null,
+      schedule: [],
       pairedAt: now(),
       lastSeen: null,
       info: pairing.info,

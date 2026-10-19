@@ -188,3 +188,43 @@ test("layouts: zones validated, screen gets one zone per playlist, deleting clea
   const dev = (await api("GET", "/api/devices", undefined, admin)).json.find((d: { id: string }) => d.id === deviceId);
   assert.equal(dev.layoutId, null);
 });
+
+test("scheduling: time slots validated, sent to the screen, and matched across midnight", async () => {
+  const { ruleMatches } = await import("../src/app.js");
+  const breakfast = (await api("POST", "/api/playlists", { name: "Breakfast", items: [{ kind: "text", text: "Eggs" }] }, admin)).json;
+  const lunch = (await api("POST", "/api/playlists", { name: "Lunch", items: [{ kind: "text", text: "Soup" }] }, admin)).json;
+  const { auth, id: deviceId } = await pairScreen("Menu board", { playlistId: lunch.id });
+
+  for (const schedule of [
+    [{ days: [], start: "06:00", end: "11:00", playlistId: breakfast.id }],
+    [{ days: [1], start: "6:00", end: "11:00", playlistId: breakfast.id }],
+    [{ days: [1], start: "06:00", end: "11:00" }],
+  ]) {
+    assert.equal((await api("PATCH", `/api/devices/${deviceId}`, { schedule }, admin)).status, 400, JSON.stringify(schedule));
+  }
+  const weekdays = [1, 2, 3, 4, 5];
+  const ok = await api("PATCH", `/api/devices/${deviceId}`, { schedule: [{ days: weekdays, start: "06:00", end: "11:00", playlistId: breakfast.id }] }, admin);
+  assert.equal(ok.status, 200);
+
+  const man = (await api("GET", "/api/player/manifest", undefined, auth)).json;
+  assert.equal(man.defaultProgram, `playlist:${lunch.id}`);
+  assert.equal(man.programs.length, 2, "both the default and the scheduled playlist are sent");
+  assert.deepEqual(man.schedule, [{ days: weekdays, start: "06:00", end: "11:00", program: `playlist:${breakfast.id}` }]);
+
+  const rule = { days: weekdays, start: "06:00", end: "11:00" };
+  const at = (s: string) => new Date(s); // local time
+  assert.equal(ruleMatches(rule, at("2026-10-19T06:00")), true, "Monday 6:00");
+  assert.equal(ruleMatches(rule, at("2026-10-19T11:00")), false, "end is exclusive");
+  assert.equal(ruleMatches(rule, at("2026-10-18T07:00")), false, "Sunday");
+  const night = { days: [5], start: "22:00", end: "02:00" };
+  assert.equal(ruleMatches(night, at("2026-10-23T23:00")), true, "Friday night");
+  assert.equal(ruleMatches(night, at("2026-10-24T01:30")), true, "early Saturday counts as Friday night");
+  assert.equal(ruleMatches(night, at("2026-10-25T01:30")), false);
+  assert.equal(ruleMatches({ days: [0], start: "00:00", end: "00:00" }, at("2026-10-18T15:00")), true, "all day Sunday");
+
+  // Deleting a scheduled playlist drops its time slot.
+  await api("DELETE", `/api/playlists/${breakfast.id}`, undefined, admin);
+  const dev = (await api("GET", "/api/devices", undefined, admin)).json.find((d: { id: string }) => d.id === deviceId);
+  assert.equal(dev.schedule.length, 0);
+  assert.equal(dev.nowShowing, "Lunch");
+});

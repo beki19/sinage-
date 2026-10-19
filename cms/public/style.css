@@ -128,6 +128,20 @@ textarea { font: inherit; color: inherit; background: var(--card); border: 1px s
 .dot.on { background: var(--ok); }
 .devices .small-text { font-size: .8rem; color: var(--muted); }
 
+dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 32px); color: var(--text); padding: 18px; }
+dialog::backdrop { background: rgba(0,0,0,.5); }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.dialog-head h2 { margin: 0; }
+.dialog-actions { margin-top: 14px; }
+.spacer { flex: 1; }
+.rules { display: grid; gap: 10px; margin-top: 10px; }
+.rule { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
+.rule .inline input, .rule .inline select { flex: none; min-width: 0; }
+.days { display: flex; flex-wrap: wrap; gap: 4px; }
+.day { border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: .85rem; cursor: pointer; user-select: none; }
+.day input { display: none; }
+.day.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px; z-index: 10; }
 @media (max-width: 600px) {
   header { flex-wrap: wrap; padding: 10px 16px; }
