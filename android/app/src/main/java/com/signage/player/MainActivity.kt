@@ -1,0 +1,319 @@
+package com.signage.player
+
+import android.os.Build
+import android.os.Bundle
+import android.os.SystemClock
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.widget.Button
+import android.widget.EditText
+import android.widget.ImageView
+import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.io.IOException
+
+/**
+ * The whole app is one fullscreen activity that moves through three states:
+ * setup (enter server address) -> pairing (show code) -> playback (loop playlist).
+ */
+class MainActivity : AppCompatActivity() {
+    private lateinit var prefs: Prefs
+    private lateinit var cache: ContentCache
+    private lateinit var player: PlaylistPlayer
+
+    private lateinit var setupView: View
+    private lateinit var serverInput: EditText
+    private lateinit var setupError: TextView
+    private lateinit var pairingView: View
+    private lateinit var pairingCode: TextView
+    private lateinit var pairingServer: TextView
+    private lateinit var statusView: TextView
+
+    private var runJob: Job? = null
+    private var setupResult: CompletableDeferred<String>? = null
+    private val tapTimes = ArrayDeque<Long>()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        prefs = Prefs(this)
+        cache = ContentCache(this)
+        player = PlaylistPlayer(
+            this,
+            view<ImageView>(R.id.image),
+            view<PlayerView>(R.id.video),
+            view(R.id.empty),
+        )
+        setupView = view(R.id.setup)
+        serverInput = view(R.id.server_input)
+        setupError = view(R.id.setup_error)
+        pairingView = view(R.id.pairing)
+        pairingCode = view(R.id.pairing_code)
+        pairingServer = view(R.id.pairing_server)
+        statusView = view(R.id.status)
+
+        view<Button>(R.id.connect).setOnClickListener { submitServer() }
+        serverInput.setOnEditorActionListener { _, action, _ ->
+            if (action == EditorInfo.IME_ACTION_GO) submitServer()
+            action == EditorInfo.IME_ACTION_GO
+        }
+
+        // Back opens the settings menu instead of quitting, so a stray remote press doesn't blank the screen.
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (setupView.visibility == View.VISIBLE) finish() else showMenu()
+            }
+        })
+
+        hideSystemUi()
+        start()
+    }
+
+    override fun onDestroy() {
+        player.release()
+        super.onDestroy()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemUi()
+    }
+
+    /** Remote "menu"/"settings" key opens the menu. */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SETTINGS) {
+            showMenu()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    /** Five quick taps anywhere opens the menu on touch screens. */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_DOWN && setupView.visibility != View.VISIBLE) {
+            val now = SystemClock.uptimeMillis()
+            tapTimes.addLast(now)
+            while (tapTimes.isNotEmpty() && now - tapTimes.first() > 3000) tapTimes.removeFirst()
+            if (tapTimes.size >= 5) {
+                tapTimes.clear()
+                showMenu()
+            }
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    // ---------- main flow ----------
+
+    private fun start() {
+        runJob?.cancel()
+        runJob = lifecycleScope.launch {
+            // Pauses everything while the app is in the background and resumes when it returns.
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                try {
+                    runFlow()
+                } finally {
+                    player.stop()
+                }
+            }
+        }
+    }
+
+    private suspend fun runFlow() {
+        while (true) {
+            val server = prefs.serverUrl ?: awaitSetup().also { prefs.serverUrl = it }
+            val api = ApiClient(server)
+            val token = prefs.deviceToken ?: pair(api, server)
+            try {
+                playLoop(api, token)
+            } catch (e: UnpairedException) {
+                // Removed in the CMS: forget everything and show a fresh pairing code.
+                player.stop()
+                prefs.unpair()
+                cache.prune(emptyList())
+            }
+        }
+    }
+
+    private suspend fun awaitSetup(): String {
+        show(setupView)
+        if (serverInput.text.isBlank()) serverInput.setText("http://")
+        serverInput.setSelection(serverInput.text.length)
+        serverInput.requestFocus()
+        val result = CompletableDeferred<String>()
+        setupResult = result
+        return result.await().also { setupResult = null }
+    }
+
+    private fun submitServer() {
+        var url = serverInput.text.toString().trim().trimEnd('/')
+        if (!url.startsWith("http://") && !url.startsWith("https://")) url = "http://$url"
+        val host = runCatching { java.net.URL(url).host }.getOrNull()
+        if (host.isNullOrBlank()) {
+            setupError.text = "That doesn't look like a web address."
+            return
+        }
+        setupError.text = ""
+        setupResult?.complete(url)
+    }
+
+    /** Shows a pairing code until an admin claims it in the CMS. Returns the device token. */
+    private suspend fun pair(api: ApiClient, server: String): String {
+        show(pairingView)
+        pairingServer.text = server
+        while (true) {
+            try {
+                pairingCode.text = "······"
+                val reg = api.register(deviceInfo())
+                pairingCode.text = reg.code
+                hideStatus()
+                while (true) {
+                    delay(3000)
+                    when (val s = api.pairStatus(reg.pollToken)) {
+                        is PairStatus.Paired -> {
+                            prefs.deviceToken = s.deviceToken
+                            prefs.deviceName = s.deviceName
+                            return s.deviceToken
+                        }
+                        PairStatus.Expired -> break // get a fresh code
+                        is PairStatus.Pending -> Unit
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                showStatus("Can't reach $server. Retrying… (press Back or tap 5 times for settings)")
+                delay(10_000)
+            }
+        }
+    }
+
+    /** Keeps the playlist in sync with the CMS and playing. Runs until cancelled or the device is unpaired. */
+    private suspend fun playLoop(api: ApiClient, token: String): Unit = coroutineScope {
+        show(null)
+        var current: String? = null
+
+        // Start straight away from what's on disk, so a reboot without network still shows content.
+        prefs.manifestJson?.let { json ->
+            val m = runCatching { Manifest.parse(json) }.getOrNull()
+            if (m != null && m.items.all { cache.isCached(it) }) {
+                player.play(this, playable(m))
+                current = m.version
+            }
+        }
+
+        while (true) {
+            var pollSeconds = 30
+            try {
+                val json = api.manifest(token)
+                val m = Manifest.parse(json)
+                pollSeconds = m.pollSeconds
+                if (m.version != current) {
+                    cache.sync(api, token, m.items) { done, total, bytes ->
+                        // Only show progress on a blank screen; never draw over live content.
+                        if (current == null) runOnUiThread {
+                            showStatus("Downloading ${done + 1} of $total (${bytes / 1_000_000} MB)")
+                        }
+                    }
+                    prefs.manifestJson = json
+                    player.play(this, playable(m))
+                    cache.prune(m.items)
+                    current = m.version
+                }
+                hideStatus()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: UnpairedException) {
+                throw e
+            } catch (e: IOException) {
+                if (current == null) showStatus("Waiting for the server… ${e.message ?: ""}")
+                pollSeconds = 15
+            } catch (e: Exception) {
+                if (current == null) showStatus("Problem loading content: ${e.message}")
+                pollSeconds = 15
+            }
+            delay(pollSeconds * 1000L)
+        }
+    }
+
+    private fun playable(m: Manifest) = m.items.map { PlayableItem(it, cache.fileFor(it)) }
+
+    private fun deviceInfo() = mapOf(
+        "manufacturer" to Build.MANUFACTURER,
+        "model" to Build.MODEL,
+        "android" to Build.VERSION.RELEASE,
+        "appVersion" to BuildConfig.VERSION_NAME,
+    )
+
+    // ---------- UI helpers ----------
+
+    /** Shows one of the full-screen panels, or none (playback). */
+    private fun show(panel: View?) {
+        setupView.visibility = if (panel == setupView) View.VISIBLE else View.GONE
+        pairingView.visibility = if (panel == pairingView) View.VISIBLE else View.GONE
+        hideStatus()
+    }
+
+    private fun showStatus(text: String) {
+        statusView.text = text
+        statusView.visibility = View.VISIBLE
+    }
+
+    private fun hideStatus() {
+        statusView.visibility = View.GONE
+    }
+
+    private fun showMenu() {
+        val name = prefs.deviceName?.let { " · $it" } ?: ""
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.menu_title) + name)
+            .setItems(arrayOf(getString(R.string.menu_change_server), getString(R.string.menu_unpair), "Exit player")) { _, which ->
+                when (which) {
+                    0 -> {
+                        prefs.unpair()
+                        prefs.serverUrl?.let { serverInput.setText(it) }
+                        prefs.serverUrl = null
+                        cache.prune(emptyList())
+                        start()
+                    }
+                    1 -> {
+                        prefs.unpair()
+                        cache.prune(emptyList())
+                        start()
+                    }
+                    2 -> finish()
+                }
+            }
+            .setNegativeButton(R.string.menu_cancel, null)
+            .show()
+    }
+
+    private fun <T : View> view(id: Int): T = checkNotNull(findViewById<T>(id))
+
+    private fun hideSystemUi() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+}
