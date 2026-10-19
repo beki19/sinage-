@@ -21,8 +21,9 @@ export interface Media {
  * stream: a live video stream (HLS .m3u8 or a plain video URL)
  * clock:  a world clock with one or more cities
  * feed:   news headlines from an RSS feed such as Google News, as a ticker or a list
+ * x:      recent posts from an X (Twitter) account
  */
-export type ItemKind = "media" | "text" | "web" | "stream" | "clock" | "feed";
+export type ItemKind = "media" | "text" | "web" | "stream" | "clock" | "feed" | "x";
 
 export interface PlaylistItem {
   id: string;
@@ -49,6 +50,8 @@ export interface PlaylistItem {
   /** kind = feed */
   mode?: "ticker" | "list";
   title?: string;
+  /** kind = x: account name without the @ */
+  handle?: string;
 }
 
 export interface Playlist {
@@ -67,6 +70,8 @@ export interface LayoutZone {
   w: number;
   h: number;
   playlistId: string | null;
+  /** Shows this one source directly (YouTube, X, news, clock…) instead of the playlist. */
+  item?: PlaylistItem | null;
 }
 
 export interface Layout {

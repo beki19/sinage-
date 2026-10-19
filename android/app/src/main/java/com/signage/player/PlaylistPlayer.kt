@@ -305,6 +305,7 @@ class PlaylistPlayer(
             val src = when {
                 item.videoId.isNotEmpty() && item.listId.isNotEmpty() -> "https://www.youtube.com/embed/${item.videoId}?list=${item.listId}&$common"
                 item.videoId.isNotEmpty() -> "https://www.youtube.com/embed/${item.videoId}?playlist=${item.videoId}&$common"
+                item.channelId.isNotEmpty() -> "https://www.youtube.com/embed/live_stream?channel=${item.channelId}&$common"
                 else -> "https://www.youtube.com/embed/videoseries?list=${item.listId}&$common"
             }
             val html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +

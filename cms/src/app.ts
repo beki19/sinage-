@@ -8,7 +8,7 @@ import {
   COMMAND_TYPES, ROLES, Store, type CommandType, type Device, type Group, type Role, type ScreenEvent, type User, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
 } from "./store.js";
 import { TEMPLATES } from "./templates.js";
-import { clockHtml, feedHtml, parseFeed, type Headline } from "./widgets.js";
+import { clockHtml, feedHtml, parseFeed, xHtml, type Headline } from "./widgets.js";
 
 export interface AppOptions {
   dataDir: string;
@@ -274,11 +274,25 @@ export function createApp(opts: AppOptions) {
             color: color(it?.color, "#ffffff"),
             background: color(it?.background, "#111827"),
           };
+        case "x":
+          return {
+            ...base, kind,
+            handle: xHandle(it?.handle),
+            color: color(it?.color, "#ffffff"),
+            background: color(it?.background, "#000000"),
+          };
         default:
-          throw new HttpError(400, "items[].kind must be media, text, web, stream, clock or feed");
+          throw new HttpError(400, "items[].kind must be media, text, web, stream, clock, feed or x");
       }
     });
   };
+
+  /** "@SkyNews", "SkyNews" or "https://x.com/SkyNews" -> "SkyNews" */
+  function xHandle(raw: unknown): string {
+    const s = str(raw, "X account", 200).replace(/^https?:\/\/(www\.)?(x|twitter)\.com\//i, "").replace(/^@/, "").split(/[/?#]/)[0];
+    if (!/^\w{1,15}$/.test(s)) throw new HttpError(400, "An X account looks like @name (letters, numbers and _ only)");
+    return s;
+  }
 
   function parseClocks(raw: unknown): { label: string; tz: string }[] {
     if (!Array.isArray(raw) || raw.length < 1 || raw.length > 8) throw new HttpError(400, "A world clock needs 1-8 cities");
@@ -294,6 +308,16 @@ export function createApp(opts: AppOptions) {
     });
   }
 
+  /** A source set directly on a zone, with errors that say which zone. */
+  const zoneItem = (raw: unknown, i: number): PlaylistItem => {
+    try {
+      return parseItems([raw])[0];
+    } catch (err) {
+      if (err instanceof HttpError) throw new HttpError(err.status, `Zone ${i + 1}: ${err.message.replace(/items\[\]\./g, "")}`);
+      throw err;
+    }
+  };
+
   const parseZones = (raw: unknown): LayoutZone[] => {
     if (!Array.isArray(raw) || raw.length < 1 || raw.length > 12) throw new HttpError(400, "A layout needs 1-12 zones");
     return raw.map((z, i) => {
@@ -307,6 +331,7 @@ export function createApp(opts: AppOptions) {
         name: typeof z?.name === "string" && z.name.trim() ? z.name.trim().slice(0, 60) : `Zone ${i + 1}`,
         x: num(z?.x, "x", 0), y: num(z?.y, "y", 0), w: num(z?.w, "width", 1), h: num(z?.h, "height", 1),
         playlistId: z?.playlistId ? findOr404(db.playlists, String(z.playlistId), "Playlist").id : null,
+        item: z?.item ? zoneItem(z.item, i) : null,
       };
       if (zone.x + zone.w > 100.01 || zone.y + zone.h > 100.01) throw new HttpError(400, `Zone ${i + 1} goes past the edge of the screen`);
       return zone;
@@ -355,9 +380,9 @@ export function createApp(opts: AppOptions) {
 
   /**
    * "https://youtu.be/abc", "https://www.youtube.com/watch?v=abc&list=PL1" or ".../playlist?list=PL1"
-   * -> { videoId, listId }, or null if it isn't a YouTube link.
+   * or ".../channel/UC.../live" -> { videoId, listId, channelId }, or null if it isn't a YouTube link.
    */
-  const youtubeIds = (url: string): { videoId: string; listId: string } | null => {
+  const youtubeIds = (url: string): { videoId: string; listId: string; channelId: string } | null => {
     const u = new URL(url);
     const host = u.hostname.replace(/^(www|m)\./, "");
     let vid = "";
@@ -368,9 +393,12 @@ export function createApp(opts: AppOptions) {
       return null;
     }
     const list = u.searchParams.get("list") ?? "";
+    const channel = u.pathname.match(/^\/channel\/(UC[\w-]{22})/)?.[1] ?? "";
     const videoId = /^[\w-]{6,20}$/.test(vid) ? vid : "";
     const listId = /^[\w-]{10,64}$/.test(list) ? list : "";
-    return videoId || listId ? { videoId, listId } : null;
+    // A channel link plays whatever the channel is streaming live.
+    const channelId = videoId || listId ? "" : channel;
+    return videoId || listId || channelId ? { videoId, listId, channelId } : null;
   };
 
   /** One playlist as the screen sees it: every item resolved to what the player needs. */
@@ -394,6 +422,8 @@ export function createApp(opts: AppOptions) {
           return [{ ...common, kind: "html", html: clockHtml({ clocks: it.clocks!, hour24: it.hour24 !== false, color: it.color!, background: it.background! }) }];
         case "feed":
           return [{ ...common, kind: "html", html: feedHtml({ itemId: it.id, mode: it.mode ?? "ticker", title: it.title ?? "", color: it.color!, background: it.background! }) }];
+        case "x":
+          return [{ ...common, kind: "html", html: xHtml({ handle: it.handle!, color: it.color!, background: it.background! }) }];
         default:
           return [];
       }
@@ -401,6 +431,12 @@ export function createApp(opts: AppOptions) {
 
   const mediaFile = (m: Media) =>
     ({ mediaId: m.id, type: m.type, mime: m.mime, size: m.size, sha256: m.sha256, url: `/api/player/media/${m.id}` });
+
+  /** A zone's own source, wrapped as a one-item playlist. */
+  const zonePlaylist = (item: PlaylistItem): Playlist => ({ id: "", name: "", items: [item], updatedAt: "" });
+
+  /** Every item that can reach a screen: in playlists and set directly on layout zones. */
+  const allItems = () => [...db.playlists.flatMap((p) => p.items), ...db.layouts.flatMap((l) => l.zones.flatMap((z) => (z.item ? [z.item] : [])))];
 
   const playlistById = (pid: string | null) => (pid ? db.playlists.find((p) => p.id === pid) : undefined);
 
@@ -419,7 +455,7 @@ export function createApp(opts: AppOptions) {
       return {
         id: ref,
         name: l.name,
-        zones: l.zones.map((z) => ({ id: z.id, x: z.x, y: z.y, w: z.w, h: z.h, items: screenItems(playlistById(z.playlistId)) })),
+        zones: l.zones.map((z) => ({ id: z.id, x: z.x, y: z.y, w: z.w, h: z.h, items: screenItems(z.item ? zonePlaylist(z.item) : playlistById(z.playlistId)) })),
       };
     }
     const p = playlistById(refId)!;
@@ -657,6 +693,7 @@ export function createApp(opts: AppOptions) {
       p.items = p.items.filter((it) => it.kind !== "media" || it.mediaId !== m.id);
       if (p.items.length !== before) p.updatedAt = now();
     }
+    for (const l of db.layouts) for (const z of l.zones) if (z.item?.kind === "media" && z.item.mediaId === m.id) z.item = null;
     fs.rmSync(path.join(mediaDir, m.filename), { force: true });
     store.save();
     res.status(204).end();
@@ -780,20 +817,25 @@ export function createApp(opts: AppOptions) {
 
     const created: Playlist[] = [];
     const zones: LayoutZone[] = t.zones.map((z) => {
-      let playlist = z.fill === "main" ? mainPlaylist : undefined;
-      if (!playlist) {
-        const base = { id: id(), duration: 30, startAt: null, endAt: null };
+      const zone = { id: id(), name: z.name, x: z.x, y: z.y, w: z.w, h: z.h, playlistId: null, item: null };
+      const base = { id: id(), duration: 30, startAt: null, endAt: null };
+      if (z.fill !== "main") {
+        // Widgets go straight on the zone; no playlist needed.
         const item: PlaylistItem =
           z.fill === "clock" ? { ...base, kind: "clock", clocks, hour24: b.hour24 !== false, ...colors }
           : z.fill === "news-ticker" ? { ...base, kind: "feed", url: feedUrl, mode: "ticker", title: feedTitle, ...colors }
           : z.fill === "news-list" ? { ...base, kind: "feed", url: feedUrl, mode: "list", title: feedTitle || "Headlines", ...colors }
-          : z.fill === "youtube" ? { ...base, kind: "web", url: youtubeUrl, sound: !!b.youtubeSound }
-          : { ...base, kind: "text", text: `${name}\nAdd your own content to the playlist "${name} · ${z.name}"`, scroll: false, ...colors };
-        playlist = { id: id(), name: `${name} · ${z.name}`, items: [item], updatedAt: now() };
+          : { ...base, kind: "web", url: youtubeUrl, sound: !!b.youtubeSound };
+        return { ...zone, item };
+      }
+      let playlist = mainPlaylist;
+      if (!playlist) {
+        const text = `${name}\nAdd your own content to the playlist "${name} · ${z.name}"`;
+        playlist = { id: id(), name: `${name} · ${z.name}`, items: [{ ...base, kind: "text", text, scroll: false, ...colors }], updatedAt: now() };
         db.playlists.push(playlist);
         created.push(playlist);
       }
-      return { id: id(), name: z.name, x: z.x, y: z.y, w: z.w, h: z.h, playlistId: playlist.id };
+      return { ...zone, playlistId: playlist.id };
     });
     const layout: Layout = { id: id(), name, zones, updatedAt: now() };
     db.layouts.push(layout);
@@ -940,7 +982,7 @@ export function createApp(opts: AppOptions) {
 
   app.get("/api/player/feed/:itemId", requireDevice, route(async (req, res) => {
     const itemId = String(req.params.itemId);
-    const item = db.playlists.flatMap((p) => p.items).find((it) => it.id === itemId && it.kind === "feed");
+    const item = allItems().find((it) => it.id === itemId && it.kind === "feed");
     if (!item) throw new HttpError(404, "Feed not found");
     res.json({ items: await headlines(item.url!) });
   }));

@@ -436,7 +436,7 @@ test("premade layout templates create zones and go straight to screens", async (
   assert.equal(applied.status, 201);
   assert.equal(applied.json.screens, 2);
   assert.equal(applied.json.layout.zones.length, 3);
-  assert.equal((await api("GET", "/api/playlists", undefined, admin)).json.length, before + 3);
+  assert.equal((await api("GET", "/api/playlists", undefined, admin)).json.length, before + 1, "only the main zone gets a playlist");
 
   const man = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json;
   assert.equal(man.defaultProgram, `layout:${applied.json.layout.id}`);
@@ -446,4 +446,23 @@ test("premade layout templates create zones and go straight to screens", async (
   const other = await pairScreen("Template TV 2");
   assert.equal((await api("POST", `/api/layouts/${applied.json.layout.id}/send`, { deviceIds: [other.id] }, admin)).json.screens, 1);
   assert.equal((await api("GET", "/api/player/manifest", undefined, other.auth)).json.defaultProgram, `layout:${applied.json.layout.id}`);
+});
+
+test("layout zones can show a source directly: YouTube channel, X, clock", async () => {
+  const zones = [
+    { name: "Live news", x: 0, y: 0, w: 60, h: 100, item: { kind: "web", url: "https://www.youtube.com/channel/UCknLrEdhRCp1aegoMqRaCZg/live" } },
+    { name: "X", x: 60, y: 0, w: 40, h: 50, item: { kind: "x", handle: "https://x.com/dwnews?lang=en" } },
+    { name: "Clock", x: 60, y: 50, w: 40, h: 50, item: { kind: "clock", clocks: [{ tz: "Africa/Addis_Ababa" }] } },
+  ];
+  assert.equal((await api("POST", "/api/layouts", { name: "x", zones: [{ x: 0, y: 0, w: 10, h: 10, item: { kind: "x", handle: "not a handle!" } }] }, admin)).status, 400);
+  const layout = await api("POST", "/api/layouts", { name: "Sources", zones }, admin);
+  assert.equal(layout.status, 201);
+  assert.equal(layout.json.zones[1].item.handle, "dwnews");
+
+  const screen = await pairScreen("Sources TV", { layoutId: layout.json.id });
+  const z = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json.programs[0].zones;
+  assert.deepEqual([z[0].items[0].kind, z[0].items[0].channelId], ["youtube", "UCknLrEdhRCp1aegoMqRaCZg"]);
+  assert.equal(z[1].items[0].kind, "html");
+  assert.match(z[1].items[0].html, /twitter\.com\/dwnews/);
+  assert.match(z[2].items[0].html, /Africa\/Addis_Ababa/);
 });

@@ -87,6 +87,35 @@ render();load();setInterval(load,10*60*1000);addEventListener("resize",render);`
   );
 }
 
+export interface XOptions {
+  handle: string;
+  color: string;
+  background: string;
+}
+
+/** X's own embedded timeline for an account. X decides what logged-out viewers see, and may show nothing. */
+export function xHtml(o: XOptions): string {
+  const dark = parseInt(o.background.slice(1, 3), 16) + parseInt(o.background.slice(3, 5), 16) + parseInt(o.background.slice(5, 7), 16) < 384;
+  return page(
+    `body{background:${o.background};color:${o.color}}#w{height:100%;overflow:hidden}#w>a{display:none}
+#f{position:absolute;inset:0;display:grid;place-content:center;text-align:center;font-size:5vmin;padding:4vmin;opacity:.8}`,
+    `<div id="w"></div><div id="f">Loading posts from @${o.handle}…</div>`,
+    `const w=document.getElementById("w"),f=document.getElementById("f");
+function build(){const a=document.createElement("a");a.className="twitter-timeline";a.href="https://twitter.com/${o.handle}";
+a.setAttribute("data-theme","${dark ? "dark" : "light"}");a.setAttribute("data-chrome","noheader nofooter noborders transparent");
+a.setAttribute("data-height",String(innerHeight));a.setAttribute("data-dnt","true");a.textContent="Posts by @${o.handle}";
+w.replaceChildren(a);if(window.twttr&&twttr.widgets)twttr.widgets.load(w);}
+build();
+const s=document.createElement("script");s.src="https://platform.twitter.com/widgets.js";s.async=true;document.body.appendChild(s);
+// The embed adds its iframe straight away but only gives it a height once posts have loaded.
+const seen=()=>{const fr=w.querySelector("iframe");if(fr&&fr.offsetHeight>50){f.style.display="none";return true}return false};
+const iv=setInterval(()=>{if(seen())clearInterval(iv)},500);
+setTimeout(()=>{if(!seen()){clearInterval(iv);f.textContent="@${o.handle} on X couldn't be shown right now"}},20000);
+// X's timeline doesn't refresh itself: rebuild it every 15 minutes for new posts.
+setInterval(build,15*60*1000);`,
+  );
+}
+
 // ---------- reading RSS / Atom feeds ----------
 
 export interface Headline {

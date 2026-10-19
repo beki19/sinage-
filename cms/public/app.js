@@ -305,6 +305,8 @@ function renderEditor() {
         const url = prompt("Web page address", "https://");
         if (url && url !== "https://") { d.items.push({ kind: "web", url, duration: 30 }); touch(); }
       } }, "+ Web page"),
+      h("button", { class: "ghost", onclick: () => { d.items.push({ ...newZoneItem("channel", {}), duration: 300 }); touch(); } }, "+ Live news channel"),
+      h("button", { class: "ghost", onclick: () => { d.items.push({ ...newZoneItem("x", {}), duration: 60 }); touch(); } }, "+ X posts"),
       h("button", { class: "ghost", onclick: () => {
         d.items.push({ kind: "clock", clocks: defaultClocks(), hour24: true, color: "#ffffff", background: "#111827", duration: 30 });
         touch();
@@ -337,7 +339,8 @@ function itemThumb(it, mediaById) {
     return h("div", { class: "glyph", style: `background:${it.background};color:${it.color}` },
       it.kind === "clock" ? `🕒 ${it.clocks.length} cit${it.clocks.length === 1 ? "y" : "ies"}` : it.mode === "list" ? "NEWS list" : "NEWS ›");
   }
-  return h("div", { class: "glyph" }, it.kind === "stream" ? "LIVE" : isYoutube(it.url) ? "▶ YouTube" : "WEB");
+  if (it.kind === "x") return h("div", { class: "glyph", style: "background:#000" }, "𝕏 posts");
+  return h("div", { class: "glyph" }, it.kind === "stream" ? "LIVE" : channelIdOf(it.url) ? "▶ LIVE TV" : isYoutube(it.url) ? "▶ YouTube" : "WEB");
 }
 
 // ---------- world clock + news helpers ----------
@@ -437,7 +440,7 @@ function openNewsPicker(onPick) {
       } }, "Add feed")));
 }
 
-function itemFields(it, mediaById, soft) {
+function itemFields(it, mediaById, soft, rerender = renderEditor) {
   switch (it.kind) {
     case "media": {
       const m = mediaById[it.mediaId];
@@ -464,6 +467,13 @@ function itemFields(it, mediaById, soft) {
           ? "Live stream (HLS .m3u8 or a video URL). Plays nonstop if it's the only item."
           : isYoutube(it.url) ? "YouTube video, playlist or live stream. Needs internet on the screen." : "Web page. Needs internet on the screen."),
       ];
+    case "x":
+      return [
+        h("input", { value: it.handle ? `@${String(it.handle).replace(/^@/, "")}` : "", placeholder: "@account, e.g. @dwnews",
+          oninput: (e) => { it.handle = e.target.value; soft(); } }),
+        h("div", { class: "inline wrap small-text" }, colorInputs(it, soft)),
+        h("div", { class: "muted small-text" }, "Shows the account's recent posts using X's own embed. X decides what logged-out viewers see, so some accounts may show little or nothing."),
+      ];
     case "clock": {
       const box = h("div", { class: "fields" });
       const draw = () => box.replaceChildren(
@@ -482,7 +492,7 @@ function itemFields(it, mediaById, soft) {
             it.url = url;
             if (label) it.title = label;
             soft();
-            renderEditor();
+            rerender();
           }) }, "Google News…")),
         h("div", { class: "inline wrap small-text" },
           h("select", { onchange: (e) => { it.mode = e.target.value; soft(); } },
@@ -579,9 +589,85 @@ function selectLayout(id) {
   if (state.layoutDraft?.dirty && !confirm("Discard unsaved changes?")) return;
   state.selectedLayout = id;
   const l = state.layouts.find((x) => x.id === id);
-  state.layoutDraft = l ? { ...l, zones: l.zones.map((z) => ({ ...z })), dirty: false } : null;
+  state.layoutDraft = l ? { ...l, zones: l.zones.map((z) => ({ ...z, item: z.item ? structuredClone(z.item) : null })), dirty: false } : null;
   renderLayoutList();
   renderLayoutEditor();
+}
+
+/** What a zone shows: a playlist, or one source set directly on the zone. */
+const ZONE_SOURCES = {
+  playlist: "A playlist",
+  youtube: "YouTube video / playlist",
+  channel: "Live TV news channel",
+  x: "X (Twitter) posts",
+  feed: "News headlines (Google News / RSS)",
+  clock: "World clock",
+  text: "Text or ticker",
+  web: "Web page",
+};
+
+/** Well-known news channels that stream live on YouTube. A channel may pause its stream or block embedding. */
+const NEWS_CHANNELS = {
+  "Al Jazeera English": "UCNye-wNBqNL5ZzHSJj3l8Bg",
+  "DW News": "UCknLrEdhRCp1aegoMqRaCZg",
+  "France 24 English": "UCQfwfsi5VrQ8yKZ-UWmAEFg",
+  "Sky News": "UCoMdktPbSTixAyNGwb-UYkQ",
+  "ABC News (US)": "UCBi2mrWuNuyYy4gbM6fU18Q",
+  "NBC News": "UCeY0bbntWzzVIaj2z3QigXg",
+  "Euronews": "UCSrZ3UV4jOidv8ppoVuvW9Q",
+  "CNA": "UC83jt4dlz1Gjl58fzQrrKZg",
+  "TRT World": "UC7fWeaHhqgM4Ry-RMpM2YYw",
+  "Africanews": "UC1_E8NeF5QHY2dtdLRBCCLA",
+};
+const channelUrl = (id) => `https://www.youtube.com/channel/${id}/live`;
+const channelIdOf = (url) => (url ?? "").match(/youtube\.com\/channel\/(UC[\w-]{22})/)?.[1] ?? null;
+
+function zoneSource(z) {
+  const it = z.item;
+  if (!it) return "playlist";
+  if (it.kind === "web") return channelIdOf(it.url) ? "channel" : isYoutube(it.url) ? "youtube" : "web";
+  return it.kind;
+}
+
+function newZoneItem(source, z) {
+  const base = { duration: 30, color: "#ffffff", background: "#111827" };
+  switch (source) {
+    case "youtube": return { ...base, kind: "web", url: "", sound: false };
+    case "channel": return { ...base, kind: "web", url: channelUrl(Object.values(NEWS_CHANNELS)[0]), sound: false };
+    case "x": return { ...base, kind: "x", handle: "", background: "#000000" };
+    case "feed": return { ...base, kind: "feed", url: googleNewsUrl("US:en", "", ""), mode: z.h <= 20 ? "ticker" : "list", title: "Top stories" };
+    case "clock": return { ...base, kind: "clock", clocks: defaultClocks(), hour24: true };
+    case "text": return { ...base, kind: "text", text: "Your message here", scroll: z.h <= 20 };
+    case "web": return { ...base, kind: "web", url: "" };
+    default: return null;
+  }
+}
+
+/** Live TV channel picker: a preset list plus "another channel" for any YouTube channel link. */
+function channelFields(it, soft, rerender) {
+  const current = channelIdOf(it.url);
+  const preset = Object.values(NEWS_CHANNELS).includes(current);
+  return [
+    h("select", { onchange: (e) => {
+      it.url = e.target.value ? channelUrl(e.target.value) : "";
+      soft();
+      rerender();
+    } },
+      Object.entries(NEWS_CHANNELS).map(([name, id]) => h("option", { value: id, selected: id === current }, name)),
+      h("option", { value: "", selected: !preset }, "Another YouTube channel…")),
+    preset ? null : h("input", { type: "url", value: it.url, placeholder: "https://www.youtube.com/channel/UC…/live",
+      oninput: (e) => { it.url = e.target.value; soft(); } }),
+    h("label", { class: "inline small-text" }, h("input", { type: "checkbox", checked: !!it.sound, onchange: (e) => { it.sound = e.target.checked; soft(); } }), "Play with sound"),
+    h("div", { class: "muted small-text" }, "Plays the channel's live stream. Channels sometimes pause their stream or don't allow it on other sites; pick another if a screen stays black."),
+  ];
+}
+
+function zoneSourceLabel(z) {
+  const src = zoneSource(z);
+  if (src === "playlist") return state.playlists.find((p) => p.id === z.playlistId)?.name ?? "Nothing yet";
+  if (src === "channel") return Object.entries(NEWS_CHANNELS).find(([, cid]) => cid === channelIdOf(z.item.url))?.[0] ?? "Live channel";
+  if (src === "x") return z.item.handle ? `@${String(z.item.handle).replace(/^@/, "")} on X` : "X";
+  return ZONE_SOURCES[src].split(" (")[0];
 }
 
 function renderLayoutEditor() {
@@ -589,44 +675,65 @@ function renderLayoutEditor() {
   const d = state.layoutDraft;
   if (!d) { box.replaceChildren(h("p", { class: "muted" }, "Pick or create a layout.")); return; }
   const touch = () => { d.dirty = true; renderLayoutEditor(); };
+  const soft = () => { d.dirty = true; saveBtn.disabled = false; };
   const saveBtn = h("button", { disabled: !d.dirty, onclick: saveLayout }, "Save");
-  const playlistName = (pid) => state.playlists.find((p) => p.id === pid)?.name ?? "No playlist";
+
+  const zoneCard = (z, i) => {
+    const num = (key, label) => h("label", { class: "inline small-text" }, label,
+      h("input", { type: "number", min: key === "w" || key === "h" ? 1 : 0, max: 100, step: "any", value: z[key],
+        onchange: (e) => { z[key] = Number(e.target.value); touch(); } }));
+    const src = zoneSource(z);
+    let fields;
+    if (src === "playlist") {
+      fields = h("select", { onchange: (e) => { z.playlistId = e.target.value || null; touch(); } },
+        h("option", { value: "" }, "Pick a playlist…"),
+        state.playlists.map((p) => h("option", { value: p.id, selected: p.id === z.playlistId }, p.name)));
+    } else if (src === "channel") {
+      fields = channelFields(z.item, soft, renderLayoutEditor);
+    } else {
+      fields = itemFields(z.item, {}, soft, renderLayoutEditor);
+    }
+    return h("div", { class: "zone-card" },
+      h("div", { class: "zone-card-head" },
+        h("span", { class: `swatch c${i % 6}` }),
+        h("input", { value: z.name, class: "zone-name", oninput: (e) => { z.name = e.target.value; soft(); } }),
+        h("button", { class: "danger small", disabled: d.zones.length === 1, title: "Remove zone",
+          onclick: () => { d.zones.splice(i, 1); touch(); } }, "✕")),
+      h("label", { class: "inline zone-source" }, "Shows",
+        h("select", { onchange: (e) => {
+          const next = e.target.value;
+          z.item = next === "playlist" ? null : newZoneItem(next, z);
+          touch();
+        } }, Object.entries(ZONE_SOURCES).map(([v, label]) => h("option", { value: v, selected: v === src }, label)))),
+      h("div", { class: "fields zone-fields" }, fields),
+      h("details", { class: "zone-pos" }, h("summary", { class: "small-text" }, `Position ${z.x}%, ${z.y}% · size ${z.w}% × ${z.h}%`),
+        h("div", { class: "inline wrap" }, num("x", "Left %"), num("y", "Top %"), num("w", "Width %"), num("h", "Height %"))),
+    );
+  };
 
   box.replaceChildren(
     h("div", { class: "editor-head" },
-      h("input", { value: d.name, oninput: (e) => { d.name = e.target.value; d.dirty = true; saveBtn.disabled = false; } }),
+      h("input", { value: d.name, oninput: (e) => { d.name = e.target.value; soft(); } }),
       saveBtn,
       h("button", { class: "ghost", disabled: d.dirty, title: d.dirty ? "Save first" : "", onclick: () => openSendLayout(d) }, "Send to screens"),
       h("button", { class: "danger", onclick: deleteLayout }, "Delete"),
     ),
-    h("p", { class: "muted" }, "Start from a preset, then pick a playlist for each zone.", d.dirty ? " · unsaved changes" : ""),
+    h("p", { class: "muted" }, "Pick a shape, then choose what each zone shows: a playlist, YouTube, a live news channel, X posts, news headlines, a world clock and more.",
+      d.dirty ? " · unsaved changes" : ""),
     h("div", { class: "inline wrap presets" }, Object.entries(LAYOUT_PRESETS).map(([name, zones]) =>
       h("button", { class: "ghost small", onclick: () => {
-        // Keep playlists already chosen, zone by zone.
-        d.zones = zones.map(([zn, x, y, w, hh], i) => ({ id: d.zones[i]?.id, name: zn, x, y, w, h: hh, playlistId: d.zones[i]?.playlistId ?? null }));
+        // Keep what each zone already shows, zone by zone.
+        d.zones = zones.map(([zn, x, y, w, hh], i) => ({
+          id: d.zones[i]?.id, name: zn, x, y, w, h: hh, playlistId: d.zones[i]?.playlistId ?? null, item: d.zones[i]?.item ?? null,
+        }));
         touch();
       } }, name))),
     h("div", { class: "screen-preview" }, d.zones.map((z, i) =>
       h("div", { class: `zone-box c${i % 6}`, style: `left:${z.x}%;top:${z.y}%;width:${z.w}%;height:${z.h}%` },
-        h("strong", {}, z.name), h("span", {}, playlistName(z.playlistId))))),
-    h("table", { class: "zones" },
-      h("thead", {}, h("tr", {}, ["Zone", "Playlist", "Left %", "Top %", "Width %", "Height %", ""].map((t) => h("th", {}, t)))),
-      h("tbody", {}, d.zones.map((z, i) => {
-        const num = (key) => h("input", { type: "number", min: key === "w" || key === "h" ? 1 : 0, max: 100, step: "any", value: z[key],
-          onchange: (e) => { z[key] = Number(e.target.value); touch(); } });
-        return h("tr", {},
-          h("td", {}, h("span", { class: `swatch c${i % 6}` }), h("input", { value: z.name, oninput: (e) => { z.name = e.target.value; d.dirty = true; saveBtn.disabled = false; } })),
-          h("td", {}, h("select", { onchange: (e) => { z.playlistId = e.target.value || null; touch(); } },
-            h("option", { value: "" }, "No playlist"),
-            state.playlists.map((p) => h("option", { value: p.id, selected: p.id === z.playlistId }, p.name)))),
-          h("td", {}, num("x")), h("td", {}, num("y")), h("td", {}, num("w")), h("td", {}, num("h")),
-          h("td", {}, h("button", { class: "danger small", disabled: d.zones.length === 1, title: "Remove zone",
-            onclick: () => { d.zones.splice(i, 1); touch(); } }, "✕")),
-        );
-      })),
-    ),
+        h("strong", {}, z.name), h("span", {}, zoneSourceLabel(z))))),
+    h("div", { class: "zone-cards" }, d.zones.map(zoneCard)),
     h("button", { class: "ghost", disabled: d.zones.length >= 12, onclick: () => {
-      d.zones.push({ name: `Zone ${d.zones.length + 1}`, x: 0, y: 0, w: 50, h: 50, playlistId: null });
+      d.zones.push({ name: `Zone ${d.zones.length + 1}`, x: 0, y: 0, w: 50, h: 50, playlistId: null, item: null });
       touch();
     } }, "+ Add zone"),
     h("p", { class: "muted small-text" }, "Only the biggest zone plays sound. Each video zone needs its own video decoder, so cheap TV boxes may manage only one or two."),

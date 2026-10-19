@@ -41,6 +41,8 @@ data class Item(
     val url: String = "",
     val videoId: String = "",
     val listId: String = "",
+    /** kind = youtube: play whatever this channel is streaming live */
+    val channelId: String = "",
     val sound: Boolean = false,
     /** kind = html: a page from the CMS (world clock, news feed). */
     val html: String = "",
@@ -185,6 +187,7 @@ data class Manifest(
                 url = it.optString("url"),
                 videoId = it.optString("videoId"),
                 listId = it.optString("listId"),
+                channelId = it.optString("channelId"),
                 sound = it.optBoolean("sound"),
                 html = it.optString("html"),
             )

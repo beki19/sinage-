@@ -103,6 +103,19 @@ textarea { font: inherit; color: inherit; background: var(--card); border: 1px s
 .zone-box span { opacity: .8; font-size: .75rem; }
 .c0 { background: rgba(37,99,235,.55); } .c1 { background: rgba(22,163,74,.55); } .c2 { background: rgba(217,119,6,.55); }
 .c3 { background: rgba(147,51,234,.55); } .c4 { background: rgba(220,38,38,.55); } .c5 { background: rgba(8,145,178,.55); }
+.zone-cards { display: grid; gap: 10px; margin-bottom: 10px; }
+.zone-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
+.zone-card-head { display: flex; align-items: center; gap: 8px; }
+.zone-card-head .zone-name { flex: 1; min-width: 0; font-weight: 600; }
+.zone-source { gap: 8px; }
+.zone-source select { flex: 1; min-width: 0; }
+.zone-fields { display: grid; gap: 6px; }
+.zone-fields > input, .zone-fields > select, .zone-fields textarea { width: 100%; }
+.zone-fields .inline input { flex: none; min-width: 0; }
+.zone-fields .inline.wrap > input[type=url], .zone-fields .inline input.feed-title { flex: 1 1 160px; width: 0; }
+.zone-fields input[type=color] { padding: 0; width: 34px; height: 28px; }
+.zone-pos summary { cursor: pointer; color: var(--muted); }
+.zone-pos .inline input { width: 72px; flex: none; min-width: 0; }
 .template-btn { width: 100%; margin-bottom: 12px; }
 .template-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin-top: 10px; }
 .template-card { display: grid; gap: 6px; padding: 8px; text-align: left; background: var(--card); color: var(--text); border-color: var(--line); }
