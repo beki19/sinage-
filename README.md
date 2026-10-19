@@ -65,7 +65,9 @@ Requirements: Android 6.0 or newer. Works with touch screens and TV remotes.
 1. **Media tab**: drag in images (JPG, PNG, WebP, GIF) and videos (MP4/H.264 is the safest choice for cheap TV boxes).
 2. **Playlists tab**: create a playlist, click media to add it, set how many seconds each item shows, reorder with the arrows, and **Save**. Besides images and videos you can add:
    - **Text or ticker**: a typed message with your colours, shown full-size or scrolling along as a ticker.
-   - **Web page / YouTube**: any web page, or a YouTube link (plays muted). Needs internet on the screen.
+   - **YouTube**: a video, playlist or live stream, muted or with sound. **Web page**: any web page. Both need internet on the screen.
+   - **World clock**: up to 8 cities side by side, 12- or 24-hour, in your colours.
+   - **News feed**: Google News headlines (pick a country, a topic or a search) or any RSS feed, as a scrolling ticker or a headline list. The CMS fetches headlines every 10 minutes and screens keep the last ones if the internet drops.
    - **Live stream**: an HLS (`.m3u8`) or direct video address. On its own in a playlist it plays nonstop.
    - Any item can have a **start / end date** so a promotion appears and disappears by itself.
 3. Open the player app on the screen. Enter the CMS address, e.g. `http://192.168.1.10:3000`. The screen shows a 6-letter code.
@@ -75,6 +77,7 @@ The screen downloads everything, then loops the playlist. When you edit a playli
 
 ### More you can do
 
+- **Ready-made designs** (Layouts tab, "Start from a ready-made design"): News & world clock, YouTube + news ticker, Newsroom, Lobby, Welcome screen, World clock wall and News wall. Pick one, fill in the YouTube link, news and cities, choose colours, tick the screens or groups, and it's created and sent in one go. Any layout can also be sent later with **Send to screens**.
 - **Layouts tab**: split the screen into zones (e.g. main video, sidebar, ticker along the bottom), each playing its own playlist. Start from a preset and adjust. Only the biggest zone plays sound.
 - **Schedule** (Screens tab): show different playlists or layouts on certain days and times, e.g. breakfast menu 06:00–11:00 on weekdays. Outside the time slots the screen shows its normal content. Times follow each screen's own clock, so set the right time zone on the device.
 - **Groups** (Screens tab): put screens in a group, e.g. "All lobby TVs", and set the content and schedule once for all of them.

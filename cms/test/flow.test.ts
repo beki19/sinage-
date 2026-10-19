@@ -376,3 +376,74 @@ test("dashboard and offline alerts", async () => {
     hook.close();
   }
 });
+
+test("world clock, news feed and YouTube items", async () => {
+  // A stand-in RSS feed shaped like Google News.
+  const rss = `<?xml version="1.0"?><rss><channel><title>Top stories</title>
+    <item><title>Rain &amp; wind expected - Daily Paper</title><source url="x">Daily Paper</source></item>
+    <item><title><![CDATA[Markets <b>rise</b> again]]></title></item>
+  </channel></rss>`;
+  let hits = 0;
+  const feed = http.createServer((_req, res) => { hits++; res.setHeader("content-type", "application/rss+xml"); res.end(rss); });
+  feed.listen(0);
+  await new Promise((r) => feed.once("listening", r));
+  const feedUrl = `http://127.0.0.1:${(feed.address() as AddressInfo).port}/rss`;
+
+  try {
+    assert.equal((await api("POST", "/api/playlists", { name: "x", items: [{ kind: "clock", clocks: [] }] }, admin)).status, 400);
+    assert.equal((await api("POST", "/api/playlists", { name: "x", items: [{ kind: "clock", clocks: [{ tz: "Mars/Base" }] }] }, admin)).status, 400);
+    const pl = await api("POST", "/api/playlists", { name: "Widgets", items: [
+      { kind: "clock", clocks: [{ tz: "Africa/Addis_Ababa" }, { label: "NYC", tz: "America/New_York" }], hour24: false },
+      { kind: "feed", url: feedUrl, mode: "list", title: "News" },
+      { kind: "web", url: "https://www.youtube.com/playlist?list=PLabcdefghijk", sound: true },
+    ] }, admin);
+    assert.equal(pl.status, 201);
+    assert.equal(pl.json.items[0].clocks[0].label, "Addis Ababa");
+
+    const preview = await api("GET", `/api/feed-preview?url=${encodeURIComponent(feedUrl)}`, undefined, admin);
+    assert.deepEqual(preview.json.items, [{ title: "Rain & wind expected", source: "Daily Paper" }, { title: "Markets rise again", source: "" }]);
+
+    const screen = await pairScreen("Widget TV", { playlistId: pl.json.id });
+    const items = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json.programs[0].zones[0].items;
+    assert.deepEqual(items.map((i: { kind: string }) => i.kind), ["html", "html", "youtube"]);
+    assert.match(items[0].html, /America\/New_York/);
+    assert.match(items[1].html, /__DEVICE_TOKEN__/);
+    assert.deepEqual([items[2].videoId, items[2].listId, items[2].sound], ["", "PLabcdefghijk", true]);
+
+    const feedItemId = pl.json.items[1].id;
+    const got = await api("GET", `/api/player/feed/${feedItemId}`, undefined, screen.auth);
+    assert.equal(got.json.items.length, 2);
+    assert.equal(hits, 1, "headlines are cached and shared");
+    assert.equal((await api("GET", `/api/player/feed/${feedItemId}`)).status, 401);
+  } finally {
+    feed.close();
+  }
+});
+
+test("premade layout templates create zones and go straight to screens", async () => {
+  const templates = (await api("GET", "/api/templates", undefined, admin)).json;
+  assert.ok(templates.length >= 5);
+  const group = (await api("POST", "/api/groups", { name: "Template group" }, admin)).json;
+  const screen = await pairScreen("Template TV");
+
+  assert.equal((await api("POST", "/api/templates/youtube-news/apply", { name: "x" }, admin)).status, 400, "needs a YouTube link");
+  assert.equal((await api("POST", "/api/templates/youtube-news/apply", { name: "x", youtubeUrl: "https://example.com" }, admin)).status, 400);
+  const before = (await api("GET", "/api/playlists", undefined, admin)).json.length;
+  const applied = await api("POST", "/api/templates/news-clock/apply", {
+    name: "Reception", clocks: [{ label: "Addis Ababa", tz: "Africa/Addis_Ababa" }],
+    feedUrl: "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en", deviceIds: [screen.id], groupIds: [group.id],
+  }, admin);
+  assert.equal(applied.status, 201);
+  assert.equal(applied.json.screens, 2);
+  assert.equal(applied.json.layout.zones.length, 3);
+  assert.equal((await api("GET", "/api/playlists", undefined, admin)).json.length, before + 3);
+
+  const man = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json;
+  assert.equal(man.defaultProgram, `layout:${applied.json.layout.id}`);
+  assert.deepEqual(man.programs[0].zones.map((z: { items: { kind: string }[] }) => z.items[0].kind), ["text", "html", "html"]);
+
+  // An existing layout can be sent to more screens later.
+  const other = await pairScreen("Template TV 2");
+  assert.equal((await api("POST", `/api/layouts/${applied.json.layout.id}/send`, { deviceIds: [other.id] }, admin)).json.screens, 1);
+  assert.equal((await api("GET", "/api/player/manifest", undefined, other.auth)).json.defaultProgram, `layout:${applied.json.layout.id}`);
+});

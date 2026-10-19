@@ -226,7 +226,7 @@ class MainActivity : AppCompatActivity() {
             val key = m.version + "/" + program?.id
             if (key == showing) return
             val files = m.media.associateBy { it.mediaId }
-            screen.play(this, program) { id -> files[id]?.takeIf { cache.isCached(it) }?.let { cache.fileFor(it) } }
+            screen.play(this, program, api.baseUrl, token) { id -> files[id]?.takeIf { cache.isCached(it) }?.let { cache.fileFor(it) } }
             showing = key
         }
 

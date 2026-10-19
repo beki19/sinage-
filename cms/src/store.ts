@@ -19,8 +19,10 @@ export interface Media {
  * text:   a typed message, shown full-zone or scrolling as a ticker
  * web:    a web page or a YouTube link
  * stream: a live video stream (HLS .m3u8 or a plain video URL)
+ * clock:  a world clock with one or more cities
+ * feed:   news headlines from an RSS feed such as Google News, as a ticker or a list
  */
-export type ItemKind = "media" | "text" | "web" | "stream";
+export type ItemKind = "media" | "text" | "web" | "stream" | "clock" | "feed";
 
 export interface PlaylistItem {
   id: string;
@@ -37,8 +39,16 @@ export interface PlaylistItem {
   color?: string;
   background?: string;
   scroll?: boolean;
-  /** kind = web | stream */
+  /** kind = web | stream | feed */
   url?: string;
+  /** kind = web: let YouTube play with sound */
+  sound?: boolean;
+  /** kind = clock */
+  clocks?: { label: string; tz: string }[];
+  hour24?: boolean;
+  /** kind = feed */
+  mode?: "ticker" | "list";
+  title?: string;
 }
 
 export interface Playlist {

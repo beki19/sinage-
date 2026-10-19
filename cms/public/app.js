@@ -271,7 +271,7 @@ function renderEditor() {
       h("button", { class: "danger", onclick: deletePlaylist }, "Delete"),
     ),
     h("p", { class: "muted" },
-      `${d.items.length} item${d.items.length === 1 ? "" : "s"} · images total ${total}s${hasVideo ? " + videos" : ""}`,
+      `${d.items.length} item${d.items.length === 1 ? "" : "s"} · about ${total}s${hasVideo ? " + videos" : ""}`,
       d.dirty ? " · unsaved changes" : ""),
     h("ol", { class: "items" }, d.items.map((it, idx) => h("li", { class: "item" },
       h("span", { class: "num" }, idx + 1),
@@ -295,9 +295,24 @@ function renderEditor() {
         touch();
       } }, "+ Text or ticker"),
       h("button", { class: "ghost", onclick: () => {
-        const url = prompt("Web page or YouTube link", "https://");
+        const url = prompt("YouTube link: a video, playlist or live stream", "https://www.youtube.com/watch?v=");
+        if (!url || /v=$/.test(url)) return;
+        if (!isYoutube(url)) { toast("That isn't a YouTube link. Use \"+ Web page\" for other sites."); return; }
+        d.items.push({ kind: "web", url, sound: false, duration: 60 });
+        touch();
+      } }, "+ YouTube"),
+      h("button", { class: "ghost", onclick: () => {
+        const url = prompt("Web page address", "https://");
         if (url && url !== "https://") { d.items.push({ kind: "web", url, duration: 30 }); touch(); }
-      } }, "+ Web page / YouTube"),
+      } }, "+ Web page"),
+      h("button", { class: "ghost", onclick: () => {
+        d.items.push({ kind: "clock", clocks: defaultClocks(), hour24: true, color: "#ffffff", background: "#111827", duration: 30 });
+        touch();
+      } }, "+ World clock"),
+      h("button", { class: "ghost", onclick: () => openNewsPicker((url, label) => {
+        d.items.push({ kind: "feed", url, mode: "ticker", title: label, color: "#ffffff", background: "#111827", duration: 60 });
+        touch();
+      }) }, "+ News feed"),
       h("button", { class: "ghost", onclick: () => {
         const url = prompt("Live stream address (HLS .m3u8 or a video URL)", "https://");
         if (url && url !== "https://") { d.items.push({ kind: "stream", url, duration: 60 }); touch(); }
@@ -318,7 +333,108 @@ function itemThumb(it, mediaById) {
   if (it.kind === "text") {
     return h("div", { class: "glyph", style: `background:${it.background};color:${it.color}` }, it.scroll ? "ticker ›" : "Aa");
   }
+  if (it.kind === "clock" || it.kind === "feed") {
+    return h("div", { class: "glyph", style: `background:${it.background};color:${it.color}` },
+      it.kind === "clock" ? `🕒 ${it.clocks.length} cit${it.clocks.length === 1 ? "y" : "ies"}` : it.mode === "list" ? "NEWS list" : "NEWS ›");
+  }
   return h("div", { class: "glyph" }, it.kind === "stream" ? "LIVE" : isYoutube(it.url) ? "▶ YouTube" : "WEB");
+}
+
+// ---------- world clock + news helpers ----------
+
+const TIME_ZONES = [
+  "Africa/Addis_Ababa", "Africa/Nairobi", "Africa/Cairo", "Africa/Lagos", "Africa/Johannesburg", "Africa/Accra",
+  "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Istanbul", "Europe/Moscow",
+  "Asia/Dubai", "Asia/Riyadh", "Asia/Karachi", "Asia/Kolkata", "Asia/Shanghai", "Asia/Singapore", "Asia/Tokyo",
+  "Australia/Sydney", "Pacific/Auckland",
+  "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Toronto", "America/Sao_Paulo", "UTC",
+];
+const cityName = (tz) => tz.split("/").pop().replace(/_/g, " ");
+
+/** This browser's own time zone first, then a few world cities. */
+function defaultClocks() {
+  const here = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  return [here, "Europe/London", "America/New_York", "Asia/Tokyo"]
+    .filter((tz, i, all) => all.indexOf(tz) === i).slice(0, 4).map((tz) => ({ label: cityName(tz), tz }));
+}
+
+function timeZoneList() {
+  if (!$("#tz-list")) document.body.append(h("datalist", { id: "tz-list" }, TIME_ZONES.map((tz) => h("option", { value: tz }))));
+  return "tz-list";
+}
+
+/** Editable list of cities for a world clock. Changes go straight into `clocks`. */
+function clockFields(clocks, changed, rerender) {
+  return h("div", { class: "clock-rows" },
+    clocks.map((c, i) => h("div", { class: "inline" },
+      h("input", { value: c.label, placeholder: "Label", class: "clock-label", oninput: (e) => { c.label = e.target.value; changed(); } }),
+      h("input", { value: c.tz, list: timeZoneList(), placeholder: "Time zone, e.g. Africa/Addis_Ababa", class: "clock-tz",
+        onchange: (e) => { if (!c.label || c.label === cityName(c.tz)) c.label = cityName(e.target.value); c.tz = e.target.value; changed(); rerender(); } }),
+      h("button", { class: "danger small", type: "button", disabled: clocks.length === 1, title: "Remove city",
+        onclick: () => { clocks.splice(i, 1); changed(); rerender(); } }, "✕"))),
+    h("button", { class: "ghost small", type: "button", disabled: clocks.length >= 8,
+      onclick: () => { clocks.push({ label: "London", tz: "Europe/London" }); changed(); rerender(); } }, "+ Add city"),
+  );
+}
+
+const NEWS_EDITIONS = {
+  "United States": "US:en", "United Kingdom": "GB:en", "Kenya": "KE:en", "Nigeria": "NG:en", "South Africa": "ZA:en",
+  "Ghana": "GH:en", "India": "IN:en", "Canada": "CA:en", "Australia": "AU:en", "Ireland": "IE:en", "Singapore": "SG:en",
+  "France (français)": "FR:fr", "Germany (Deutsch)": "DE:de", "Spain (español)": "ES:es", "Egypt (العربية)": "EG:ar",
+};
+const NEWS_TOPICS = {
+  "Top stories": "", "World": "WORLD", "National": "NATION", "Business": "BUSINESS", "Technology": "TECHNOLOGY",
+  "Science": "SCIENCE", "Health": "HEALTH", "Sports": "SPORTS", "Entertainment": "ENTERTAINMENT", "Search for…": "SEARCH",
+};
+
+function googleNewsUrl(ceid, topic, query) {
+  const [gl, lang] = ceid.split(":");
+  const params = `hl=${lang === "en" ? `en-${gl}` : lang}&gl=${gl}&ceid=${ceid}`;
+  if (topic === "SEARCH") return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&${params}`;
+  if (topic) return `https://news.google.com/rss/headlines/section/topic/${topic}?${params}`;
+  return `https://news.google.com/rss?${params}`;
+}
+
+/** Google News edition + topic (or search) pickers. Returns the element and a getter for the feed address and a label. */
+function newsFields() {
+  const edition = h("select", {}, Object.entries(NEWS_EDITIONS).map(([name, v]) => h("option", { value: v }, name)));
+  const topic = h("select", {}, Object.entries(NEWS_TOPICS).map(([name, v]) => h("option", { value: v }, name)));
+  const query = h("input", { placeholder: "Search words, e.g. Addis Ababa", hidden: true });
+  topic.addEventListener("change", () => (query.hidden = topic.value !== "SEARCH"));
+  const value = () => {
+    if (topic.value === "SEARCH" && !query.value.trim()) throw new Error("Type what to search for");
+    const label = topic.value === "SEARCH" ? query.value.trim() : topic.value ? topic.selectedOptions[0].text : "Top stories";
+    return { url: googleNewsUrl(edition.value, topic.value, query.value.trim()), label };
+  };
+  return { el: h("div", { class: "inline wrap" }, edition, topic, query), value };
+}
+
+/** Pick a Google News feed (or paste any RSS address) and preview its headlines. */
+function openNewsPicker(onPick) {
+  const news = newsFields();
+  const custom = h("input", { type: "url", placeholder: "…or paste any RSS feed address", class: "grow" });
+  const preview = h("div", { class: "small-text muted" });
+  const pick = () => {
+    if (custom.value.trim()) return { url: custom.value.trim(), label: "" };
+    return news.value();
+  };
+  openDialog("Add a news feed",
+    h("p", { class: "muted small-text" }, "Headlines from Google News, refreshed every 10 minutes. Show them as a ticker or as a list."),
+    news.el,
+    h("div", { class: "inline wrap", style: "margin-top:8px" }, custom),
+    preview,
+    h("div", { class: "inline wrap dialog-actions" },
+      h("button", { class: "ghost", onclick: async () => {
+        try {
+          preview.textContent = "Loading…";
+          const { items } = await api("GET", `/api/feed-preview?url=${encodeURIComponent(pick().url)}`);
+          preview.replaceChildren(h("ul", { class: "plain" }, items.slice(0, 5).map((i) => h("li", {}, i.title))));
+        } catch (err) { preview.textContent = err.message; }
+      } }, "Preview headlines"),
+      h("span", { class: "spacer" }),
+      h("button", { onclick: () => {
+        try { const p = pick(); $("#dialog").close(); onPick(p.url, p.label); } catch (err) { toast(err.message); }
+      } }, "Add feed")));
 }
 
 function itemFields(it, mediaById, soft) {
@@ -340,13 +456,51 @@ function itemFields(it, mediaById, soft) {
     case "stream":
       return [
         h("input", { type: "url", value: it.url, placeholder: "https://…", oninput: (e) => { it.url = e.target.value; soft(); } }),
+        it.kind === "web" && isYoutube(it.url)
+          ? h("label", { class: "inline small-text" }, h("input", { type: "checkbox", checked: !!it.sound, onchange: (e) => { it.sound = e.target.checked; soft(); } }),
+              "Play with sound (some devices only allow muted autoplay)")
+          : null,
         h("div", { class: "muted small-text" }, it.kind === "stream"
           ? "Live stream (HLS .m3u8 or a video URL). Plays nonstop if it's the only item."
-          : "Web page, or a YouTube link (plays muted). Needs internet on the screen."),
+          : isYoutube(it.url) ? "YouTube video, playlist or live stream. Needs internet on the screen." : "Web page. Needs internet on the screen."),
+      ];
+    case "clock": {
+      const box = h("div", { class: "fields" });
+      const draw = () => box.replaceChildren(
+        clockFields(it.clocks, soft, draw),
+        h("div", { class: "inline wrap small-text" },
+          h("label", { class: "inline" }, h("input", { type: "checkbox", checked: it.hour24 !== false, onchange: (e) => { it.hour24 = e.target.checked; soft(); } }), "24-hour"),
+          colorInputs(it, soft)));
+      draw();
+      return box;
+    }
+    case "feed":
+      return [
+        h("div", { class: "inline wrap" },
+          h("input", { type: "url", value: it.url, class: "grow", oninput: (e) => { it.url = e.target.value; soft(); } }),
+          h("button", { class: "ghost small", type: "button", onclick: () => openNewsPicker((url, label) => {
+            it.url = url;
+            if (label) it.title = label;
+            soft();
+            renderEditor();
+          }) }, "Google News…")),
+        h("div", { class: "inline wrap small-text" },
+          h("select", { onchange: (e) => { it.mode = e.target.value; soft(); } },
+            h("option", { value: "ticker", selected: it.mode !== "list" }, "Scrolling ticker"),
+            h("option", { value: "list", selected: it.mode === "list" }, "Headline list")),
+          h("input", { value: it.title ?? "", placeholder: "Title (optional)", class: "feed-title", oninput: (e) => { it.title = e.target.value; soft(); } }),
+          colorInputs(it, soft)),
       ];
     default:
       return h("div", { class: "muted" }, `Unknown item (${it.kind})`);
   }
+}
+
+function colorInputs(it, soft) {
+  return [
+    h("label", { class: "inline" }, "Text", h("input", { type: "color", value: it.color, oninput: (e) => { it.color = e.target.value; soft(); } })),
+    h("label", { class: "inline" }, "Background", h("input", { type: "color", value: it.background, oninput: (e) => { it.background = e.target.value; soft(); } })),
+  ];
 }
 
 /** Optional "only show between" window, in each screen's own local time. */
@@ -442,6 +596,7 @@ function renderLayoutEditor() {
     h("div", { class: "editor-head" },
       h("input", { value: d.name, oninput: (e) => { d.name = e.target.value; d.dirty = true; saveBtn.disabled = false; } }),
       saveBtn,
+      h("button", { class: "ghost", disabled: d.dirty, title: d.dirty ? "Save first" : "", onclick: () => openSendLayout(d) }, "Send to screens"),
       h("button", { class: "danger", onclick: deleteLayout }, "Delete"),
     ),
     h("p", { class: "muted" }, "Start from a preset, then pick a playlist for each zone.", d.dirty ? " · unsaved changes" : ""),
@@ -499,6 +654,117 @@ async function deleteLayout() {
   await Promise.all([loadLayouts(), loadDevices()]);
   renderLayoutEditor();
 }
+
+// ---------- ready-made designs + sending layouts to screens ----------
+
+const FILL_LABELS = { main: "Your content", clock: "World clock", "news-ticker": "News ticker", "news-list": "Headlines", youtube: "YouTube" };
+const THEMES = {
+  "Dark": { color: "#ffffff", background: "#111827" },
+  "Navy": { color: "#ffffff", background: "#1e3a8a" },
+  "Light": { color: "#111827", background: "#f3f4f6" },
+  "Black & gold": { color: "#facc15", background: "#000000" },
+};
+
+function zonePreview(zones, label) {
+  return h("div", { class: "screen-preview mini-preview" }, zones.map((z, i) =>
+    h("div", { class: `zone-box c${i % 6}`, style: `left:${z.x}%;top:${z.y}%;width:${z.w}%;height:${z.h}%` }, h("span", {}, label(z)))));
+}
+
+/** Checkboxes for screens and groups. Screens in a group are left out: they show what the group shows. */
+function targetChecklist() {
+  const boxes = [];
+  const row = (kind, x, text, note) => {
+    const cb = h("input", { type: "checkbox", value: x.id });
+    boxes.push({ kind, cb });
+    return h("label", { class: "inline target" }, cb, text, note ? h("span", { class: "muted small-text" }, note) : null);
+  };
+  const free = state.devices.filter((d) => !d.groupId);
+  const el = h("div", { class: "targets" },
+    state.groups.map((g) => row("group", g, `Group: ${g.name}`, `${state.devices.filter((d) => d.groupId === g.id).length} screens`)),
+    free.map((d) => row("device", d, d.name, d.online ? "online" : "offline")),
+    !state.groups.length && !free.length ? h("p", { class: "muted small-text" }, "No screens yet. Pair one in the Screens tab; you can send this later.") : null,
+  );
+  const value = () => ({
+    deviceIds: boxes.filter((b) => b.kind === "device" && b.cb.checked).map((b) => b.cb.value),
+    groupIds: boxes.filter((b) => b.kind === "group" && b.cb.checked).map((b) => b.cb.value),
+  });
+  return { el, value };
+}
+
+function openSendLayout(layout) {
+  const targets = targetChecklist();
+  openDialog(`Send "${layout.name}" to screens`,
+    h("p", { class: "muted small-text" }, "The ticked screens and groups show this layout instead of what they show now (their schedules still apply)."),
+    targets.el,
+    h("div", { class: "inline wrap dialog-actions" }, h("span", { class: "spacer" }),
+      h("button", { onclick: async () => {
+        try {
+          const { screens } = await api("POST", `/api/layouts/${layout.id}/send`, targets.value());
+          $("#dialog").close();
+          toast(`Sent to ${screens} screen${screens === 1 ? "" : "s"}/group${screens === 1 ? "" : "s"}. They switch within 30 seconds.`);
+          await Promise.all([loadDevices(), loadGroups()]);
+        } catch (err) { toast(err.message); }
+      } }, "Send")));
+}
+
+async function openTemplates() {
+  const templates = await api("GET", "/api/templates");
+  openDialog("Ready-made designs",
+    h("p", { class: "muted small-text" }, "Pick a design. You'll choose the YouTube link, news and cities next, then send it to your screens."),
+    h("div", { class: "template-grid" }, templates.map((t) =>
+      h("button", { class: "template-card", onclick: () => openTemplateSetup(t) },
+        zonePreview(t.zones, (z) => FILL_LABELS[z.fill]),
+        h("strong", {}, t.name),
+        h("span", { class: "small-text muted" }, t.description)))));
+}
+
+function openTemplateSetup(t) {
+  const fills = new Set(t.zones.map((z) => z.fill));
+  const clocks = defaultClocks();
+  const news = newsFields();
+  const name = h("input", { value: t.name, required: true });
+  const theme = h("select", {}, Object.keys(THEMES).map((k) => h("option", { value: k }, k)));
+  const main = h("select", {}, h("option", { value: "" }, "A new empty playlist (fill it later)"),
+    state.playlists.map((p) => h("option", { value: p.id }, p.name)));
+  const youtube = h("input", { type: "url", placeholder: "https://www.youtube.com/watch?v=… (video, playlist or live)", class: "grow" });
+  const sound = h("input", { type: "checkbox" });
+  const clockBox = h("div");
+  const drawClocks = () => clockBox.replaceChildren(clockFields(clocks, () => {}, drawClocks));
+  drawClocks();
+  const targets = targetChecklist();
+  const section = (title, ...body) => h("div", { class: "setup-section" }, h("h3", {}, title), ...body);
+
+  openDialog(t.name,
+    zonePreview(t.zones, (z) => (z.name === FILL_LABELS[z.fill] ? z.name : `${z.name}: ${FILL_LABELS[z.fill]}`)),
+    section("Name", h("div", { class: "inline wrap" }, name, h("label", { class: "inline small-text" }, "Colours", theme))),
+    fills.has("main") ? section("Your content", main) : null,
+    fills.has("youtube") ? section("YouTube", h("div", { class: "inline wrap" }, youtube),
+      h("label", { class: "inline small-text" }, sound, "Play with sound")) : null,
+    fills.has("news-ticker") || fills.has("news-list") ? section("Google News", news.el) : null,
+    fills.has("clock") ? section("World clock cities", clockBox) : null,
+    section("Send to", targets.el),
+    h("div", { class: "inline wrap dialog-actions" },
+      h("button", { class: "ghost", onclick: openTemplates }, "← Back"),
+      h("span", { class: "spacer" }),
+      h("button", { onclick: async () => {
+        try {
+          const feed = fills.has("news-ticker") || fills.has("news-list") ? news.value() : null;
+          const result = await api("POST", `/api/templates/${t.id}/apply`, {
+            name: name.value, ...THEMES[theme.value],
+            mainPlaylistId: main.value || null,
+            youtubeUrl: youtube.value.trim(), youtubeSound: sound.checked,
+            feedUrl: feed?.url, feedTitle: feed?.label,
+            clocks, ...targets.value(),
+          });
+          $("#dialog").close();
+          toast(result.screens ? `Created "${result.layout.name}" and sent it. Screens switch within 30 seconds.` : `Created "${result.layout.name}".`);
+          await Promise.all([loadPlaylists(), loadLayouts(), loadDevices(), loadGroups()]);
+          selectLayout(result.layout.id);
+        } catch (err) { toast(err.message); }
+      } }, "Create design")));
+}
+
+$("#open-templates").addEventListener("click", () => openTemplates().catch((err) => toast(err.message)));
 
 $("#new-layout").addEventListener("submit", async (e) => {
   e.preventDefault();

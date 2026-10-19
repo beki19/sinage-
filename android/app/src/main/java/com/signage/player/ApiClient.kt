@@ -13,7 +13,8 @@ import kotlin.coroutines.coroutineContext
 
 /** Talks to the CMS player API. All calls run on the IO dispatcher and throw IOException on network trouble. */
 class ApiClient(baseUrl: String) {
-    private val base = baseUrl.trimEnd('/')
+    val baseUrl = baseUrl.trimEnd('/')
+    private val base = this.baseUrl
 
     suspend fun register(info: Map<String, String>): Registration {
         val body = JSONObject().put("info", JSONObject(info as Map<*, *>)).toString()

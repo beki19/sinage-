@@ -7,6 +7,8 @@ import multer from "multer";
 import {
   COMMAND_TYPES, ROLES, Store, type CommandType, type Device, type Group, type Role, type ScreenEvent, type User, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
 } from "./store.js";
+import { TEMPLATES } from "./templates.js";
+import { clockHtml, feedHtml, parseFeed, type Headline } from "./widgets.js";
 
 export interface AppOptions {
   dataDir: string;
@@ -94,6 +96,9 @@ interface ScreenItem {
   scroll?: boolean;
   url?: string;
   videoId?: string;
+  listId?: string;
+  sound?: boolean;
+  html?: string;
 }
 
 // Express 5 forwards rejected promises to the error handler, so handlers can just throw.
@@ -249,13 +254,45 @@ export function createApp(opts: AppOptions) {
             scroll: Boolean(it?.scroll),
           };
         case "web":
+          return { ...base, kind, url: httpUrl(it?.url, "items[].url"), sound: Boolean(it?.sound) };
         case "stream":
           return { ...base, kind, url: httpUrl(it?.url, "items[].url") };
+        case "clock":
+          return {
+            ...base, kind,
+            clocks: parseClocks(it?.clocks),
+            hour24: it?.hour24 !== false,
+            color: color(it?.color, "#ffffff"),
+            background: color(it?.background, "#111827"),
+          };
+        case "feed":
+          return {
+            ...base, kind,
+            url: httpUrl(it?.url, "items[].url"),
+            mode: it?.mode === "list" ? "list" : "ticker",
+            title: typeof it?.title === "string" ? it.title.trim().slice(0, 60) : "",
+            color: color(it?.color, "#ffffff"),
+            background: color(it?.background, "#111827"),
+          };
         default:
-          throw new HttpError(400, "items[].kind must be media, text, web or stream");
+          throw new HttpError(400, "items[].kind must be media, text, web, stream, clock or feed");
       }
     });
   };
+
+  function parseClocks(raw: unknown): { label: string; tz: string }[] {
+    if (!Array.isArray(raw) || raw.length < 1 || raw.length > 8) throw new HttpError(400, "A world clock needs 1-8 cities");
+    return raw.map((c) => {
+      const tz = str(c?.tz, "clocks[].tz", 60);
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: tz });
+      } catch {
+        throw new HttpError(400, `Unknown time zone "${tz}" (use names like Africa/Addis_Ababa or Europe/London)`);
+      }
+      const label = typeof c?.label === "string" && c.label.trim() ? c.label.trim().slice(0, 40) : tz.split("/").pop()!.replace(/_/g, " ");
+      return { label, tz };
+    });
+  }
 
   const parseZones = (raw: unknown): LayoutZone[] => {
     if (!Array.isArray(raw) || raw.length < 1 || raw.length > 12) throw new HttpError(400, "A layout needs 1-12 zones");
@@ -316,16 +353,24 @@ export function createApp(opts: AppOptions) {
     if (target.schedule && body?.schedule !== undefined) target.schedule = parseSchedule(body.schedule);
   }
 
-  /** "https://youtu.be/abc" or "https://www.youtube.com/watch?v=abc" -> "abc" */
-  const youtubeId = (url: string): string | null => {
+  /**
+   * "https://youtu.be/abc", "https://www.youtube.com/watch?v=abc&list=PL1" or ".../playlist?list=PL1"
+   * -> { videoId, listId }, or null if it isn't a YouTube link.
+   */
+  const youtubeIds = (url: string): { videoId: string; listId: string } | null => {
     const u = new URL(url);
     const host = u.hostname.replace(/^(www|m)\./, "");
-    let vid: string | null = null;
+    let vid = "";
     if (host === "youtu.be") vid = u.pathname.slice(1);
     else if (host === "youtube.com" || host === "youtube-nocookie.com") {
-      vid = u.searchParams.get("v") ?? u.pathname.match(/^\/(?:embed|shorts|live)\/([^/]+)/)?.[1] ?? null;
+      vid = u.searchParams.get("v") ?? u.pathname.match(/^\/(?:embed|shorts|live)\/([^/]+)/)?.[1] ?? "";
+    } else {
+      return null;
     }
-    return vid && /^[\w-]{6,20}$/.test(vid) ? vid : null;
+    const list = u.searchParams.get("list") ?? "";
+    const videoId = /^[\w-]{6,20}$/.test(vid) ? vid : "";
+    const listId = /^[\w-]{10,64}$/.test(list) ? list : "";
+    return videoId || listId ? { videoId, listId } : null;
   };
 
   /** One playlist as the screen sees it: every item resolved to what the player needs. */
@@ -340,11 +385,15 @@ export function createApp(opts: AppOptions) {
         case "text":
           return [{ ...common, kind: "text", text: it.text, color: it.color, background: it.background, scroll: !!it.scroll }];
         case "web": {
-          const vid = youtubeId(it.url!);
-          return [vid ? { ...common, kind: "youtube", videoId: vid } : { ...common, kind: "web", url: it.url }];
+          const yt = youtubeIds(it.url!);
+          return [yt ? { ...common, kind: "youtube", ...yt, sound: !!it.sound } : { ...common, kind: "web", url: it.url }];
         }
         case "stream":
           return [{ ...common, kind: "stream", url: it.url }];
+        case "clock":
+          return [{ ...common, kind: "html", html: clockHtml({ clocks: it.clocks!, hour24: it.hour24 !== false, color: it.color!, background: it.background! }) }];
+        case "feed":
+          return [{ ...common, kind: "html", html: feedHtml({ itemId: it.id, mode: it.mode ?? "ticker", title: it.title ?? "", color: it.color!, background: it.background! }) }];
         default:
           return [];
       }
@@ -693,6 +742,73 @@ export function createApp(opts: AppOptions) {
     res.status(204).end();
   }));
 
+  // ---------- ready-made layout templates ----------
+
+  app.get("/api/templates", requireLogin, route((_req, res) => res.json(TEMPLATES)));
+
+  /** Shows a layout on the listed screens and groups. */
+  const sendLayout = (layoutId: string, body: Record<string, unknown> | undefined) => {
+    const ids = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
+    const devices = ids(body?.deviceIds).map((x) => findOr404(db.devices, x, "Screen"));
+    const groups = ids(body?.groupIds).map((x) => findOr404(db.groups, x, "Group"));
+    for (const t of [...devices, ...groups]) {
+      t.layoutId = layoutId;
+      t.playlistId = null;
+    }
+    return devices.length + groups.length;
+  };
+
+  app.post("/api/templates/:id/apply", requireLogin, route((req, res) => {
+    const t = TEMPLATES.find((x) => x.id === req.params.id);
+    if (!t) throw new HttpError(404, "Template not found");
+    const b = req.body ?? {};
+    const name = str(b.name ?? t.name, "name");
+    const fills = new Set(t.zones.map((z) => z.fill));
+    const colors = { color: color(b.color, "#ffffff"), background: color(b.background, "#111827") };
+
+    // Check everything before creating anything.
+    const youtubeUrl = fills.has("youtube") ? httpUrl(b.youtubeUrl, "YouTube link") : "";
+    if (youtubeUrl && !youtubeIds(youtubeUrl)) throw new HttpError(400, "That doesn't look like a YouTube video, playlist or live link");
+    const feedUrl = fills.has("news-ticker") || fills.has("news-list")
+      ? httpUrl(b.feedUrl || "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en", "News feed")
+      : "";
+    const clocks = fills.has("clock")
+      ? parseClocks(b.clocks ?? [{ label: "London", tz: "Europe/London" }, { label: "New York", tz: "America/New_York" }, { label: "Tokyo", tz: "Asia/Tokyo" }])
+      : [];
+    const mainPlaylist = b.mainPlaylistId ? findOr404(db.playlists, String(b.mainPlaylistId), "Playlist") : undefined;
+    const feedTitle = typeof b.feedTitle === "string" ? b.feedTitle.trim().slice(0, 60) : "";
+
+    const created: Playlist[] = [];
+    const zones: LayoutZone[] = t.zones.map((z) => {
+      let playlist = z.fill === "main" ? mainPlaylist : undefined;
+      if (!playlist) {
+        const base = { id: id(), duration: 30, startAt: null, endAt: null };
+        const item: PlaylistItem =
+          z.fill === "clock" ? { ...base, kind: "clock", clocks, hour24: b.hour24 !== false, ...colors }
+          : z.fill === "news-ticker" ? { ...base, kind: "feed", url: feedUrl, mode: "ticker", title: feedTitle, ...colors }
+          : z.fill === "news-list" ? { ...base, kind: "feed", url: feedUrl, mode: "list", title: feedTitle || "Headlines", ...colors }
+          : z.fill === "youtube" ? { ...base, kind: "web", url: youtubeUrl, sound: !!b.youtubeSound }
+          : { ...base, kind: "text", text: `${name}\nAdd your own content to the playlist "${name} · ${z.name}"`, scroll: false, ...colors };
+        playlist = { id: id(), name: `${name} · ${z.name}`, items: [item], updatedAt: now() };
+        db.playlists.push(playlist);
+        created.push(playlist);
+      }
+      return { id: id(), name: z.name, x: z.x, y: z.y, w: z.w, h: z.h, playlistId: playlist.id };
+    });
+    const layout: Layout = { id: id(), name, zones, updatedAt: now() };
+    db.layouts.push(layout);
+    const screens = sendLayout(layout.id, b);
+    store.save();
+    res.status(201).json({ layout, playlists: created, screens });
+  }));
+
+  app.post("/api/layouts/:id/send", requireLogin, route((req, res) => {
+    const l = findOr404(db.layouts, String(req.params.id), "Layout");
+    const screens = sendLayout(l.id, req.body);
+    store.save();
+    res.json({ screens });
+  }));
+
   // ---------- screen groups ----------
 
   app.get("/api/groups", requireLogin, route((_req, res) => res.json(db.groups)));
@@ -794,6 +910,39 @@ export function createApp(opts: AppOptions) {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     if (!d.screenshotAt || !fs.existsSync(screenshotFile(d.id))) throw new HttpError(404, "No screenshot yet");
     res.set("cache-control", "no-store").type("image/jpeg").sendFile(screenshotFile(d.id));
+  }));
+
+  // ---------- news feeds ----------
+
+  const FEED_TTL_MS = 10 * 60 * 1000;
+  const feedCache = new Map<string, { at: number; items: Headline[] }>();
+
+  /** Headlines for a feed address, fetched at most every 10 minutes and shared by all screens. */
+  const headlines = async (url: string): Promise<Headline[]> => {
+    const cached = feedCache.get(url);
+    if (cached && Date.now() - cached.at < FEED_TTL_MS) return cached.items;
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { "user-agent": "SignageCMS/1.2 (+RSS reader)" } });
+      if (!res.ok) throw new Error(`The feed answered HTTP ${res.status}`);
+      const items = parseFeed((await res.text()).slice(0, 3_000_000));
+      if (!items.length) throw new Error("No headlines found at that address. Is it an RSS or Atom feed?");
+      feedCache.set(url, { at: Date.now(), items });
+      return items;
+    } catch (err) {
+      if (cached) return cached.items; // keep showing the last good headlines
+      throw new HttpError(502, (err as Error).name === "TimeoutError" ? "The feed took too long to answer" : (err as Error).message);
+    }
+  };
+
+  app.get("/api/feed-preview", requireLogin, route(async (req, res) => {
+    res.json({ items: (await headlines(httpUrl(req.query.url, "url"))).slice(0, 10) });
+  }));
+
+  app.get("/api/player/feed/:itemId", requireDevice, route(async (req, res) => {
+    const itemId = String(req.params.itemId);
+    const item = db.playlists.flatMap((p) => p.items).find((it) => it.id === itemId && it.kind === "feed");
+    if (!item) throw new HttpError(404, "Feed not found");
+    res.json({ items: await headlines(item.url!) });
   }));
 
   // ---------- dashboard + offline alerts ----------

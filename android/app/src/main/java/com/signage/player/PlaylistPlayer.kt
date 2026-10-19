@@ -53,6 +53,9 @@ class PlaylistPlayer(
     private val context: Context,
     private val container: FrameLayout,
     private val withSound: Boolean,
+    /** CMS address: the origin for world clock and news pages, so they can fetch headlines from it. */
+    private val serverUrl: String,
+    private val deviceToken: String,
 ) {
     private val imageView = ImageView(context).apply {
         scaleType = ImageView.ScaleType.FIT_CENTER
@@ -157,7 +160,7 @@ class PlaylistPlayer(
                 playMedia(MediaItem.fromUri(Uri.fromFile(fileFor(item.mediaId!!)!!)), untilEnded = false)
             }
             "text" -> showText(item)
-            "web", "youtube" -> showWeb(item)
+            "web", "youtube", "html" -> showWeb(item)
         }
     }
 
@@ -183,7 +186,7 @@ class PlaylistPlayer(
                 showText(item)
                 delay(item.duration * 1000L)
             }
-            "web", "youtube" -> {
+            "web", "youtube", "html" -> {
                 showWeb(item)
                 delay(item.duration * 1000L)
             }
@@ -293,10 +296,17 @@ class PlaylistPlayer(
         val wv = ensureWeb()
         val loaded = CompletableDeferred<Unit>()
         pageLoaded = loaded
-        if (item.kind == "youtube") {
+        if (item.kind == "html") {
+            wv.loadDataWithBaseURL(serverUrl.trimEnd('/') + "/", item.html.replace("__DEVICE_TOKEN__", deviceToken), "text/html", "utf-8", null)
+        } else if (item.kind == "youtube") {
             // An embed inside a page of our own: YouTube refuses embeds loaded without a referring page.
-            val id = item.videoId
-            val src = "https://www.youtube.com/embed/$id?autoplay=1&mute=1&controls=0&loop=1&playlist=$id&playsinline=1&rel=0"
+            val mute = if (item.sound) 0 else 1
+            val common = "autoplay=1&mute=$mute&controls=0&loop=1&playsinline=1&rel=0"
+            val src = when {
+                item.videoId.isNotEmpty() && item.listId.isNotEmpty() -> "https://www.youtube.com/embed/${item.videoId}?list=${item.listId}&$common"
+                item.videoId.isNotEmpty() -> "https://www.youtube.com/embed/${item.videoId}?playlist=${item.videoId}&$common"
+                else -> "https://www.youtube.com/embed/videoseries?list=${item.listId}&$common"
+            }
             val html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
                 "<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}iframe{border:0;width:100%;height:100%}</style>" +
                 "</head><body><iframe src=\"$src\" allow=\"autoplay; encrypted-media\" allowfullscreen></iframe></body></html>"

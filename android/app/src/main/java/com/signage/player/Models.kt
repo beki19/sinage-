@@ -24,7 +24,7 @@ data class MediaFile(
     val url: String,
 )
 
-/** One thing shown in a zone. [kind] is image, video, text, web, youtube or stream. */
+/** One thing shown in a zone. [kind] is image, video, text, web, youtube, stream or html (world clock, news). */
 data class Item(
     val id: String,
     val kind: String,
@@ -40,6 +40,10 @@ data class Item(
     val scroll: Boolean = false,
     val url: String = "",
     val videoId: String = "",
+    val listId: String = "",
+    val sound: Boolean = false,
+    /** kind = html: a page from the CMS (world clock, news feed). */
+    val html: String = "",
 ) {
     fun isActiveAt(now: Long) = (startAt == null || now >= startAt) && (endAt == null || now < endAt)
 }
@@ -180,10 +184,13 @@ data class Manifest(
                 scroll = it.optBoolean("scroll"),
                 url = it.optString("url"),
                 videoId = it.optString("videoId"),
+                listId = it.optString("listId"),
+                sound = it.optBoolean("sound"),
+                html = it.optString("html"),
             )
         }
 
-        private val KNOWN_KINDS = setOf("image", "video", "text", "web", "youtube", "stream")
+        private val KNOWN_KINDS = setOf("image", "video", "text", "web", "youtube", "stream", "html")
 
         /** "2026-10-19T08:00" in this device's time zone. */
         private fun localTime(s: String): Long? {
