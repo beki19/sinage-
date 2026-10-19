@@ -77,7 +77,7 @@ main { padding: 20px; max-width: 1200px; margin: 0 auto; }
 .item .num { color: var(--muted); text-align: center; }
 .item .mini { width: 96px; aspect-ratio: 16/9; background: #000; border-radius: 6px; overflow: hidden; }
 .item .mini img, .item .mini video { width: 100%; height: 100%; object-fit: cover; }
-.item .dur { width: 80px; }
+.item .dur { width: 80px; min-width: 0; flex: none; }
 .item .fields { display: grid; gap: 6px; min-width: 0; }
 .item .fields input[type=url], .item textarea { width: 100%; }
 .item input[type=color] { padding: 0; width: 34px; height: 28px; }
@@ -96,6 +96,27 @@ textarea { font: inherit; color: inherit; background: var(--card); border: 1px s
 .picker span { display: block; padding: 4px 6px; font-size: .8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .editor-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .editor-head input { font-size: 1.1rem; font-weight: 600; flex: 1; }
+
+.presets { margin: 4px 0 14px; }
+.screen-preview { position: relative; aspect-ratio: 16/9; background: #000; border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+.zone-box { position: absolute; display: grid; place-content: center; text-align: center; gap: 2px; padding: 4px; color: #fff; font-size: .8rem; border: 1px solid rgba(255,255,255,.5); overflow: hidden; }
+.zone-box span { opacity: .8; font-size: .75rem; }
+.c0 { background: rgba(37,99,235,.55); } .c1 { background: rgba(22,163,74,.55); } .c2 { background: rgba(217,119,6,.55); }
+.c3 { background: rgba(147,51,234,.55); } .c4 { background: rgba(220,38,38,.55); } .c5 { background: rgba(8,145,178,.55); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+.zones { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+.zones th { text-align: left; font-size: .8rem; color: var(--muted); font-weight: 600; padding: 4px; }
+.zones td { padding: 4px; }
+.zones td:first-child { white-space: nowrap; }
+.zones input[type=number] { width: 72px; }
+.zones td:first-child input { width: calc(100% - 20px); min-width: 90px; }
+.zones select { max-width: 180px; }
+@media (max-width: 700px) {
+  .zones thead { display: none; }
+  .zones tr { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .zones td:nth-child(1), .zones td:nth-child(2) { grid-column: 1 / -1; }
+  .zones select, .zones input[type=number] { width: 100%; max-width: none; }
+}
 
 .pair { margin-bottom: 16px; }
 .code-input { text-transform: uppercase; letter-spacing: .2em; font-family: ui-monospace, monospace; max-width: 180px; }

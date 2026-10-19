@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
-import { Store, type Device, type Media, type Playlist, type PlaylistItem } from "./store.js";
+import { Store, type Device, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem } from "./store.js";
 
 export interface AppOptions {
   dataDir: string;
@@ -189,6 +189,35 @@ export function createApp(opts: AppOptions) {
     });
   };
 
+  const parseZones = (raw: unknown): LayoutZone[] => {
+    if (!Array.isArray(raw) || raw.length < 1 || raw.length > 12) throw new HttpError(400, "A layout needs 1-12 zones");
+    return raw.map((z, i) => {
+      const num = (v: unknown, field: string, min: number) => {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < min || n > 100) throw new HttpError(400, `Zone ${i + 1}: ${field} must be ${min}-100`);
+        return Math.round(n * 100) / 100;
+      };
+      const zone = {
+        id: typeof z?.id === "string" ? z.id : id(),
+        name: typeof z?.name === "string" && z.name.trim() ? z.name.trim().slice(0, 60) : `Zone ${i + 1}`,
+        x: num(z?.x, "x", 0), y: num(z?.y, "y", 0), w: num(z?.w, "width", 1), h: num(z?.h, "height", 1),
+        playlistId: z?.playlistId ? findOr404(db.playlists, String(z.playlistId), "Playlist").id : null,
+      };
+      if (zone.x + zone.w > 100.01 || zone.y + zone.h > 100.01) throw new HttpError(400, `Zone ${i + 1} goes past the edge of the screen`);
+      return zone;
+    });
+  };
+
+  /** Reads playlistId / layoutId from a request body onto a screen. */
+  const applyContent = (target: { playlistId: string | null; layoutId: string | null }, body: Record<string, unknown> | undefined) => {
+    if (body?.playlistId !== undefined) {
+      target.playlistId = body.playlistId ? findOr404(db.playlists, String(body.playlistId), "Playlist").id : null;
+    }
+    if (body?.layoutId !== undefined) {
+      target.layoutId = body.layoutId ? findOr404(db.layouts, String(body.layoutId), "Layout").id : null;
+    }
+  };
+
   /** "https://youtu.be/abc" or "https://www.youtube.com/watch?v=abc" -> "abc" */
   const youtubeId = (url: string): string | null => {
     const u = new URL(url);
@@ -226,19 +255,50 @@ export function createApp(opts: AppOptions) {
   const mediaFile = (m: Media) =>
     ({ mediaId: m.id, type: m.type, mime: m.mime, size: m.size, sha256: m.sha256, url: `/api/player/media/${m.id}` });
 
+  const playlistById = (pid: string | null) => (pid ? db.playlists.find((p) => p.id === pid) : undefined);
+
+  /** "layout:<id>" or "playlist:<id>" for what a screen shows, or null if nothing (or it was deleted). */
+  const contentRef = (c: { playlistId: string | null; layoutId: string | null }): string | null => {
+    if (c.layoutId && db.layouts.some((l) => l.id === c.layoutId)) return `layout:${c.layoutId}`;
+    if (c.playlistId && playlistById(c.playlistId)) return `playlist:${c.playlistId}`;
+    return null;
+  };
+
+  /** A "program" is what fills the whole screen: a list of zones, each looping its own items. */
+  const programFor = (ref: string) => {
+    const [kind, refId] = ref.split(":");
+    if (kind === "layout") {
+      const l = db.layouts.find((x) => x.id === refId)!;
+      return {
+        id: ref,
+        name: l.name,
+        zones: l.zones.map((z) => ({ id: z.id, x: z.x, y: z.y, w: z.w, h: z.h, items: screenItems(playlistById(z.playlistId)) })),
+      };
+    }
+    const p = playlistById(refId)!;
+    return { id: ref, name: p.name, zones: [{ id: "main", x: 0, y: 0, w: 100, h: 100, items: screenItems(p) }] };
+  };
+
+  /** The playlist a version-1.0 player (fullscreen images and videos only) should show for a program. */
+  const legacyPlaylist = (ref: string | null): Playlist | undefined => {
+    if (!ref) return undefined;
+    const [kind, refId] = ref.split(":");
+    if (kind === "playlist") return playlistById(refId);
+    const zones = db.layouts.find((l) => l.id === refId)?.zones ?? [];
+    const biggest = [...zones].sort((a, b) => b.w * b.h - a.w * a.h)[0];
+    return playlistById(biggest?.playlistId ?? null);
+  };
+
   const manifestFor = (device: Device) => {
-    const playlist = device.playlistId ? db.playlists.find((p) => p.id === device.playlistId) : undefined;
-    // A "program" is what fills the whole screen: a list of zones, each looping its own items.
-    const programs = playlist
-      ? [{ id: `playlist:${playlist.id}`, name: playlist.name, zones: [{ id: "main", x: 0, y: 0, w: 100, h: 100, items: screenItems(playlist) }] }]
-      : [];
+    const defaultProgram = contentRef(device);
+    const programs = defaultProgram ? [programFor(defaultProgram)] : [];
     const mediaIds = new Set(programs.flatMap((p) => p.zones.flatMap((z) => z.items.flatMap((i) => (i.mediaId ? [i.mediaId] : [])))));
     const media = db.media.filter((m) => mediaIds.has(m.id)).map(mediaFile);
-    const defaultProgram = programs[0]?.id ?? null;
     const version = crypto.createHash("sha256")
       .update(JSON.stringify([device.name, programs, defaultProgram, media]))
       .digest("hex").slice(0, 16);
     // Players from version 1.0 only understand `items`: images and videos of the main playlist.
+    const playlist = legacyPlaylist(defaultProgram);
     const legacyItems = (playlist?.items ?? []).flatMap((it) => {
       const m = it.kind === "media" ? db.media.find((x) => x.id === it.mediaId) : undefined;
       return m ? [{ id: it.id, ...mediaFile(m), duration: it.duration }] : [];
@@ -370,6 +430,42 @@ export function createApp(opts: AppOptions) {
     const p = findOr404(db.playlists, String(req.params.id), "Playlist");
     db.playlists = db.playlists.filter((x) => x !== p);
     for (const d of db.devices) if (d.playlistId === p.id) d.playlistId = null;
+    for (const l of db.layouts) for (const z of l.zones) if (z.playlistId === p.id) z.playlistId = null;
+    store.save();
+    res.status(204).end();
+  }));
+
+  // ---------- layouts ----------
+
+  app.get("/api/layouts", requireAdmin, route((_req, res) => res.json(db.layouts)));
+
+  app.post("/api/layouts", requireAdmin, route((req, res) => {
+    const l: Layout = {
+      id: id(),
+      name: str(req.body?.name, "name"),
+      zones: req.body?.zones
+        ? parseZones(req.body.zones)
+        : [{ id: id(), name: "Main", x: 0, y: 0, w: 100, h: 100, playlistId: null }],
+      updatedAt: now(),
+    };
+    db.layouts.push(l);
+    store.save();
+    res.status(201).json(l);
+  }));
+
+  app.put("/api/layouts/:id", requireAdmin, route((req, res) => {
+    const l = findOr404(db.layouts, String(req.params.id), "Layout");
+    if (req.body?.name !== undefined) l.name = str(req.body.name, "name");
+    if (req.body?.zones !== undefined) l.zones = parseZones(req.body.zones);
+    l.updatedAt = now();
+    store.save();
+    res.json(l);
+  }));
+
+  app.delete("/api/layouts/:id", requireAdmin, route((req, res) => {
+    const l = findOr404(db.layouts, String(req.params.id), "Layout");
+    db.layouts = db.layouts.filter((x) => x !== l);
+    for (const d of db.devices) if (d.layoutId === l.id) d.layoutId = null;
     store.save();
     res.status(204).end();
   }));
@@ -385,16 +481,17 @@ export function createApp(opts: AppOptions) {
     const code = str(req.body?.code, "code", 20).toUpperCase().replace(/[^A-Z0-9]/g, "");
     const pairing = db.pairings.find((p) => p.code === code && !p.deviceId);
     if (!pairing) throw new HttpError(404, "No screen is showing that code (codes expire after 15 minutes)");
-    const playlistId = req.body?.playlistId ? findOr404(db.playlists, String(req.body.playlistId), "Playlist").id : null;
     const device: Device = {
       id: id(),
       name: str(req.body?.name, "name"),
       token: secret(),
-      playlistId,
+      playlistId: null,
+      layoutId: null,
       pairedAt: now(),
       lastSeen: null,
       info: pairing.info,
     };
+    applyContent(device, req.body);
     db.devices.push(device);
     pairing.deviceId = device.id;
     store.save();
@@ -404,9 +501,7 @@ export function createApp(opts: AppOptions) {
   app.patch("/api/devices/:id", requireAdmin, route((req, res) => {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     if (req.body?.name !== undefined) d.name = str(req.body.name, "name");
-    if (req.body?.playlistId !== undefined) {
-      d.playlistId = req.body.playlistId ? findOr404(db.playlists, String(req.body.playlistId), "Playlist").id : null;
-    }
+    applyContent(d, req.body);
     store.save();
     res.json(publicDevice(d));
   }));

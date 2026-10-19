@@ -155,3 +155,36 @@ test("text, web, YouTube and stream items with start/end dates", async () => {
   assert.equal(man.items.length, 0, "old players only get images and videos");
   assert.equal(man.media.length, 0);
 });
+
+test("layouts: zones validated, screen gets one zone per playlist, deleting cleans up", async () => {
+  const a = (await api("POST", "/api/playlists", { name: "Main", items: [{ kind: "text", text: "A" }] }, admin)).json;
+  const t = (await api("POST", "/api/playlists", { name: "Ticker", items: [{ kind: "text", text: "News", scroll: true }] }, admin)).json;
+
+  const zones = [
+    { name: "Main", x: 0, y: 0, w: 100, h: 88, playlistId: a.id },
+    { name: "Ticker", x: 0, y: 88, w: 100, h: 12, playlistId: t.id },
+  ];
+  assert.equal((await api("POST", "/api/layouts", { name: "x", zones: [{ x: 50, y: 0, w: 60, h: 10 }] }, admin)).status, 400);
+  assert.equal((await api("POST", "/api/layouts", { name: "x", zones: [] }, admin)).status, 400);
+  assert.equal((await api("POST", "/api/layouts", { name: "x", zones: [{ x: 0, y: 0, w: 10, h: 10, playlistId: "nope" }] }, admin)).status, 404);
+  const layout = await api("POST", "/api/layouts", { name: "Lobby split", zones }, admin);
+  assert.equal(layout.status, 201);
+
+  const { auth, id: deviceId } = await pairScreen("Split TV", { layoutId: layout.json.id, playlistId: a.id });
+  let man = (await api("GET", "/api/player/manifest", undefined, auth)).json;
+  assert.equal(man.defaultProgram, `layout:${layout.json.id}`, "a layout wins over a playlist");
+  assert.equal(man.programs[0].zones.length, 2);
+  assert.equal(man.programs[0].zones[1].h, 12);
+  assert.equal(man.programs[0].zones[1].items[0].text, "News");
+
+  // Deleting a zone's playlist empties that zone; deleting the layout falls back to the playlist.
+  await api("DELETE", `/api/playlists/${t.id}`, undefined, admin);
+  man = (await api("GET", "/api/player/manifest", undefined, auth)).json;
+  assert.equal(man.programs[0].zones[1].items.length, 0);
+  await api("DELETE", `/api/layouts/${layout.json.id}`, undefined, admin);
+  man = (await api("GET", "/api/player/manifest", undefined, auth)).json;
+  assert.equal(man.defaultProgram, `playlist:${a.id}`);
+
+  const dev = (await api("GET", "/api/devices", undefined, admin)).json.find((d: { id: string }) => d.id === deviceId);
+  assert.equal(dev.layoutId, null);
+});

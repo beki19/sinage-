@@ -2,7 +2,12 @@
 
 // ---------- state + helpers ----------
 
-const state = { token: localStorage.getItem("token"), media: [], playlists: [], devices: [], selectedPlaylist: null, draft: null };
+const state = {
+  token: localStorage.getItem("token"),
+  media: [], playlists: [], layouts: [], devices: [],
+  selectedPlaylist: null, draft: null,
+  selectedLayout: null, layoutDraft: null,
+};
 const $ = (sel) => document.querySelector(sel);
 
 /** Tiny element builder: h("div", {class: "x", onclick}, child, "text") */
@@ -325,7 +330,7 @@ async function deletePlaylist() {
   await api("DELETE", `/api/playlists/${d.id}`);
   state.draft = null;
   state.selectedPlaylist = null;
-  await Promise.all([loadPlaylists(), loadDevices()]);
+  await Promise.all([loadPlaylists(), loadLayouts(), loadDevices()]);
   renderEditor();
 }
 
@@ -339,18 +344,146 @@ $("#new-playlist").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message); }
 });
 
-// ---------- devices ----------
+// ---------- layouts ----------
 
-function playlistOptions(selected) {
-  return [h("option", { value: "" }, "No playlist"),
-    ...state.playlists.map((p) => h("option", { value: p.id, selected: p.id === selected }, p.name))];
+const LAYOUT_PRESETS = {
+  "Fullscreen": [["Main", 0, 0, 100, 100]],
+  "Main + ticker": [["Main", 0, 0, 100, 88], ["Ticker", 0, 88, 100, 12]],
+  "Main + sidebar": [["Main", 0, 0, 75, 100], ["Sidebar", 75, 0, 25, 100]],
+  "Main + sidebar + ticker": [["Main", 0, 0, 75, 88], ["Sidebar", 75, 0, 25, 88], ["Ticker", 0, 88, 100, 12]],
+  "Two halves": [["Left", 0, 0, 50, 100], ["Right", 50, 0, 50, 100]],
+  "Four quarters": [["Top left", 0, 0, 50, 50], ["Top right", 50, 0, 50, 50], ["Bottom left", 0, 50, 50, 50], ["Bottom right", 50, 50, 50, 50]],
+};
+
+async function loadLayouts() {
+  state.layouts = await api("GET", "/api/layouts");
+  renderLayoutList();
+  renderPlaylistSelects();
 }
 
+function renderLayoutList() {
+  const ul = $("#layout-list");
+  ul.replaceChildren(...state.layouts.map((l) =>
+    h("li", {}, h("button", { class: l.id === state.selectedLayout ? "active" : "", onclick: () => selectLayout(l.id) },
+      `${l.name} `, h("span", { class: "muted" }, `(${l.zones.length} zone${l.zones.length === 1 ? "" : "s"})`))),
+  ));
+  if (!state.layouts.length) ul.append(h("li", { class: "muted" }, "None yet"));
+}
+
+function selectLayout(id) {
+  if (state.layoutDraft?.dirty && !confirm("Discard unsaved changes?")) return;
+  state.selectedLayout = id;
+  const l = state.layouts.find((x) => x.id === id);
+  state.layoutDraft = l ? { ...l, zones: l.zones.map((z) => ({ ...z })), dirty: false } : null;
+  renderLayoutList();
+  renderLayoutEditor();
+}
+
+function renderLayoutEditor() {
+  const box = $("#layout-editor");
+  const d = state.layoutDraft;
+  if (!d) { box.replaceChildren(h("p", { class: "muted" }, "Pick or create a layout.")); return; }
+  const touch = () => { d.dirty = true; renderLayoutEditor(); };
+  const saveBtn = h("button", { disabled: !d.dirty, onclick: saveLayout }, "Save");
+  const playlistName = (pid) => state.playlists.find((p) => p.id === pid)?.name ?? "No playlist";
+
+  box.replaceChildren(
+    h("div", { class: "editor-head" },
+      h("input", { value: d.name, oninput: (e) => { d.name = e.target.value; d.dirty = true; saveBtn.disabled = false; } }),
+      saveBtn,
+      h("button", { class: "danger", onclick: deleteLayout }, "Delete"),
+    ),
+    h("p", { class: "muted" }, "Start from a preset, then pick a playlist for each zone.", d.dirty ? " · unsaved changes" : ""),
+    h("div", { class: "inline wrap presets" }, Object.entries(LAYOUT_PRESETS).map(([name, zones]) =>
+      h("button", { class: "ghost small", onclick: () => {
+        // Keep playlists already chosen, zone by zone.
+        d.zones = zones.map(([zn, x, y, w, hh], i) => ({ id: d.zones[i]?.id, name: zn, x, y, w, h: hh, playlistId: d.zones[i]?.playlistId ?? null }));
+        touch();
+      } }, name))),
+    h("div", { class: "screen-preview" }, d.zones.map((z, i) =>
+      h("div", { class: `zone-box c${i % 6}`, style: `left:${z.x}%;top:${z.y}%;width:${z.w}%;height:${z.h}%` },
+        h("strong", {}, z.name), h("span", {}, playlistName(z.playlistId))))),
+    h("table", { class: "zones" },
+      h("thead", {}, h("tr", {}, ["Zone", "Playlist", "Left %", "Top %", "Width %", "Height %", ""].map((t) => h("th", {}, t)))),
+      h("tbody", {}, d.zones.map((z, i) => {
+        const num = (key) => h("input", { type: "number", min: key === "w" || key === "h" ? 1 : 0, max: 100, step: "any", value: z[key],
+          onchange: (e) => { z[key] = Number(e.target.value); touch(); } });
+        return h("tr", {},
+          h("td", {}, h("span", { class: `swatch c${i % 6}` }), h("input", { value: z.name, oninput: (e) => { z.name = e.target.value; d.dirty = true; saveBtn.disabled = false; } })),
+          h("td", {}, h("select", { onchange: (e) => { z.playlistId = e.target.value || null; touch(); } },
+            h("option", { value: "" }, "No playlist"),
+            state.playlists.map((p) => h("option", { value: p.id, selected: p.id === z.playlistId }, p.name)))),
+          h("td", {}, num("x")), h("td", {}, num("y")), h("td", {}, num("w")), h("td", {}, num("h")),
+          h("td", {}, h("button", { class: "danger small", disabled: d.zones.length === 1, title: "Remove zone",
+            onclick: () => { d.zones.splice(i, 1); touch(); } }, "✕")),
+        );
+      })),
+    ),
+    h("button", { class: "ghost", disabled: d.zones.length >= 12, onclick: () => {
+      d.zones.push({ name: `Zone ${d.zones.length + 1}`, x: 0, y: 0, w: 50, h: 50, playlistId: null });
+      touch();
+    } }, "+ Add zone"),
+    h("p", { class: "muted small-text" }, "Only the biggest zone plays sound. Each video zone needs its own video decoder, so cheap TV boxes may manage only one or two."),
+  );
+}
+
+async function saveLayout() {
+  const d = state.layoutDraft;
+  try {
+    await api("PUT", `/api/layouts/${d.id}`, { name: d.name, zones: d.zones });
+    d.dirty = false;
+    await loadLayouts();
+    selectLayout(d.id);
+    toast("Saved. Screens update within 30 seconds.");
+  } catch (err) { toast(err.message); }
+}
+
+async function deleteLayout() {
+  const d = state.layoutDraft;
+  const screens = state.devices.filter((x) => x.layoutId === d.id).length;
+  if (!confirm(`Delete layout "${d.name}"?${screens ? ` ${screens} screen(s) using it will go back to their playlist.` : ""}`)) return;
+  await api("DELETE", `/api/layouts/${d.id}`);
+  state.layoutDraft = null;
+  state.selectedLayout = null;
+  await Promise.all([loadLayouts(), loadDevices()]);
+  renderLayoutEditor();
+}
+
+$("#new-layout").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const l = await api("POST", "/api/layouts", { name: e.target.name.value });
+    e.target.reset();
+    await loadLayouts();
+    selectLayout(l.id);
+  } catch (err) { toast(err.message); }
+});
+
+// ---------- devices ----------
+
+/** One select for "what this screen shows": a fullscreen playlist or a layout. Values look like "playlist:<id>". */
+function contentOptions(selected) {
+  return [
+    h("option", { value: "" }, "Nothing"),
+    state.playlists.length ? h("optgroup", { label: "Playlists (fullscreen)" },
+      state.playlists.map((p) => h("option", { value: `playlist:${p.id}`, selected: `playlist:${p.id}` === selected }, p.name))) : null,
+    state.layouts.length ? h("optgroup", { label: "Layouts" },
+      state.layouts.map((l) => h("option", { value: `layout:${l.id}`, selected: `layout:${l.id}` === selected }, l.name))) : null,
+  ];
+}
+
+const contentValue = (x) => (x.layoutId ? `layout:${x.layoutId}` : x.playlistId ? `playlist:${x.playlistId}` : "");
+const contentBody = (value) => {
+  const [kind, id] = value.split(":");
+  return { playlistId: kind === "playlist" ? id : null, layoutId: kind === "layout" ? id : null };
+};
+
 function renderPlaylistSelects() {
-  const sel = $("#pair-form .playlist-select");
+  const sel = $("#pair-form .content-select");
   const current = sel.value;
-  sel.replaceChildren(...playlistOptions(current));
+  sel.replaceChildren(...contentOptions(current).filter(Boolean));
   renderDevices();
+  if (state.layoutDraft && !state.layoutDraft.dirty) renderLayoutEditor();
 }
 
 async function loadDevices() {
@@ -368,10 +501,10 @@ function renderDevices() {
     h("td", {}, h("strong", {}, d.name), h("div", { class: "small-text" }, `Paired ${new Date(d.pairedAt).toLocaleDateString()}`)),
     h("td", {}, h("span", { class: `dot ${d.online ? "on" : ""}` }), d.online ? "Online" : `Offline · ${fmtAgo(d.lastSeen)}`),
     h("td", {}, h("select", { onchange: async (e) => {
-      await api("PATCH", `/api/devices/${d.id}`, { playlistId: e.target.value || null });
-      toast("Playlist assigned. The screen switches within 30 seconds.");
+      await api("PATCH", `/api/devices/${d.id}`, contentBody(e.target.value));
+      toast("Saved. The screen switches within 30 seconds.");
       loadDevices();
-    } }, playlistOptions(d.playlistId))),
+    } }, contentOptions(contentValue(d)))),
     h("td", { class: "small-text" }, [d.info?.manufacturer, d.info?.model].filter(Boolean).join(" ") || "—",
       d.info?.appVersion ? h("div", {}, `App ${d.info.appVersion}`) : ""),
     h("td", {}, h("div", { class: "inline" },
@@ -393,7 +526,7 @@ $("#pair-form").addEventListener("submit", async (e) => {
   const f = e.target;
   $("#pair-error").textContent = "";
   try {
-    await api("POST", "/api/devices/pair", { code: f.code.value, name: f.name.value, playlistId: f.playlistId.value || null });
+    await api("POST", "/api/devices/pair", { code: f.code.value, name: f.name.value, ...contentBody(f.content.value) });
     f.reset();
     toast("Screen paired");
     loadDevices();
@@ -406,7 +539,7 @@ async function start() {
   $("#login").hidden = true;
   $("#main").hidden = false;
   try {
-    await Promise.all([loadMedia(), loadPlaylists(), loadDevices()]);
+    await Promise.all([loadMedia(), loadPlaylists(), loadLayouts(), loadDevices()]);
   } catch { /* 401 already handled */ }
 }
 

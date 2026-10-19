@@ -22,6 +22,7 @@
       <nav>
         <button data-tab="media" class="active">Media</button>
         <button data-tab="playlists">Playlists</button>
+        <button data-tab="layouts">Layouts</button>
         <button data-tab="devices">Screens</button>
       </nav>
       <button id="logout" class="ghost">Log out</button>
@@ -53,6 +54,23 @@
         </div>
       </section>
 
+      <section id="tab-layouts" class="tab" hidden>
+        <div class="split">
+          <aside class="card">
+            <h2>Layouts</h2>
+            <p class="muted small-text">Split the screen into zones, each playing its own playlist, e.g. a video with a ticker along the bottom.</p>
+            <ul id="layout-list" class="list"></ul>
+            <form id="new-layout" class="inline">
+              <input name="name" placeholder="New layout name" required>
+              <button type="submit">Add</button>
+            </form>
+          </aside>
+          <div id="layout-editor" class="card">
+            <p class="muted">Pick or create a layout.</p>
+          </div>
+        </div>
+      </section>
+
       <section id="tab-devices" class="tab" hidden>
         <form id="pair-form" class="card pair">
           <h2>Add a screen</h2>
@@ -60,13 +78,13 @@
           <div class="inline wrap">
             <input name="code" placeholder="Code on screen" maxlength="8" required class="code-input">
             <input name="name" placeholder="Screen name, e.g. Lobby TV" required>
-            <select name="playlistId" class="playlist-select"></select>
+            <select name="content" class="content-select"></select>
             <button type="submit">Pair screen</button>
           </div>
           <p class="error" id="pair-error"></p>
         </form>
         <table class="card devices">
-          <thead><tr><th>Screen</th><th>Status</th><th>Playlist</th><th>Device</th><th></th></tr></thead>
+          <thead><tr><th>Screen</th><th>Status</th><th>Showing</th><th>Device</th><th></th></tr></thead>
           <tbody id="device-rows"></tbody>
         </table>
       </section>

@@ -48,11 +48,31 @@ export interface Playlist {
   updatedAt: string;
 }
 
+/** A screen split into zones, each looping its own playlist. Positions are percent of the screen. */
+export interface LayoutZone {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  playlistId: string | null;
+}
+
+export interface Layout {
+  id: string;
+  name: string;
+  zones: LayoutZone[];
+  updatedAt: string;
+}
+
 export interface Device {
   id: string;
   name: string;
   token: string;
+  /** What the screen shows: a layout if set, otherwise a fullscreen playlist. */
   playlistId: string | null;
+  layoutId: string | null;
   pairedAt: string;
   lastSeen: string | null;
   info: Record<string, string>;
@@ -70,12 +90,13 @@ export interface PendingPairing {
 export interface Data {
   media: Media[];
   playlists: Playlist[];
+  layouts: Layout[];
   devices: Device[];
   pairings: PendingPairing[];
   sessions: { token: string; createdAt: string }[];
 }
 
-const empty = (): Data => ({ media: [], playlists: [], devices: [], pairings: [], sessions: [] });
+const empty = (): Data => ({ media: [], playlists: [], layouts: [], devices: [], pairings: [], sessions: [] });
 
 /** Small JSON-file database. Fine for hundreds of screens; swap for SQL beyond that. */
 export class Store {
@@ -90,6 +111,7 @@ export class Store {
       : empty();
     // Fill in fields added after a db.json was first written.
     for (const p of this.data.playlists) for (const it of p.items) it.kind ??= "media";
+    for (const d of this.data.devices) d.layoutId ??= null;
   }
 
   save() {
