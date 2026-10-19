@@ -14,11 +14,31 @@ export interface Media {
   createdAt: string;
 }
 
+/**
+ * media:  an uploaded image or video
+ * text:   a typed message, shown full-zone or scrolling as a ticker
+ * web:    a web page or a YouTube link
+ * stream: a live video stream (HLS .m3u8 or a plain video URL)
+ */
+export type ItemKind = "media" | "text" | "web" | "stream";
+
 export interface PlaylistItem {
   id: string;
-  mediaId: string;
-  /** Seconds to show an image. Videos play to the end and ignore this. */
+  kind: ItemKind;
+  /** Seconds on screen. Videos play to the end and ignore this. */
   duration: number;
+  /** Optional window the item is shown in, as local date-times ("2026-10-19T08:00") on each screen's own clock. */
+  startAt?: string | null;
+  endAt?: string | null;
+  /** kind = media */
+  mediaId?: string;
+  /** kind = text */
+  text?: string;
+  color?: string;
+  background?: string;
+  scroll?: boolean;
+  /** kind = web | stream */
+  url?: string;
 }
 
 export interface Playlist {
@@ -68,6 +88,8 @@ export class Store {
     this.data = fs.existsSync(this.file)
       ? { ...empty(), ...JSON.parse(fs.readFileSync(this.file, "utf8")) }
       : empty();
+    // Fill in fields added after a db.json was first written.
+    for (const p of this.data.playlists) for (const it of p.items) it.kind ??= "media";
   }
 
   save() {

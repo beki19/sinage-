@@ -112,3 +112,46 @@ test("full flow: upload, playlist, pair a screen, fetch manifest and media, unpa
   await api("DELETE", `/api/devices/${paired.json.id}`, undefined, admin);
   assert.equal((await api("GET", "/api/player/manifest", undefined, device)).status, 401);
 });
+
+/** Registers a screen and pairs it from the admin side. Returns the device auth header and its id. */
+async function pairScreen(name: string, extra: Record<string, unknown> = {}) {
+  const reg = await api("POST", "/api/player/register", { info: {} });
+  const paired = await api("POST", "/api/devices/pair", { code: reg.json.code, name, ...extra }, admin);
+  assert.equal(paired.status, 201);
+  const done = await api("GET", `/api/player/pair-status?pollToken=${reg.json.pollToken}`);
+  return { auth: `Device ${done.json.deviceToken}`, id: paired.json.id as string };
+}
+
+test("text, web, YouTube and stream items with start/end dates", async () => {
+  const items = [
+    { kind: "text", text: "Closed Monday", color: "#FFFFFF", background: "#000000", scroll: true, duration: 12 },
+    { kind: "web", url: "https://example.com/menu", duration: 30, startAt: "2026-01-01T08:00", endAt: "2026-12-31T18:00" },
+    { kind: "web", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", duration: 60 },
+    { kind: "stream", url: "https://example.com/live.m3u8", duration: 60 },
+  ];
+  const pl = await api("POST", "/api/playlists", { name: "Mixed", items }, admin);
+  assert.equal(pl.status, 201);
+  assert.equal(pl.json.items[0].color, "#ffffff");
+
+  const bad = [
+    { kind: "text", text: "" },
+    { kind: "web", url: "javascript:alert(1)" },
+    { kind: "text", text: "x", color: "red" },
+    { kind: "web", url: "https://a.b", startAt: "2026-02-01T00:00", endAt: "2026-01-01T00:00" },
+    { kind: "web", url: "https://a.b", startAt: "tomorrow" },
+    { kind: "nope" },
+  ];
+  for (const it of bad) assert.equal((await api("POST", "/api/playlists", { name: "x", items: [it] }, admin)).status, 400, JSON.stringify(it));
+
+  const { auth } = await pairScreen("Kiosk", { playlistId: pl.json.id });
+  const man = (await api("GET", "/api/player/manifest", undefined, auth)).json;
+  assert.equal(man.defaultProgram, `playlist:${pl.json.id}`);
+  const zone = man.programs[0].zones[0];
+  assert.deepEqual([zone.x, zone.y, zone.w, zone.h], [0, 0, 100, 100]);
+  assert.deepEqual(zone.items.map((i: { kind: string }) => i.kind), ["text", "web", "youtube", "stream"]);
+  assert.equal(zone.items[0].scroll, true);
+  assert.equal(zone.items[1].startAt, "2026-01-01T08:00");
+  assert.equal(zone.items[2].videoId, "dQw4w9WgXcQ");
+  assert.equal(man.items.length, 0, "old players only get images and videos");
+  assert.equal(man.media.length, 0);
+});

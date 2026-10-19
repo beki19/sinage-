@@ -10,7 +10,6 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
-import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
@@ -21,7 +20,6 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -37,7 +35,7 @@ import java.io.IOException
 class MainActivity : AppCompatActivity() {
     private lateinit var prefs: Prefs
     private lateinit var cache: ContentCache
-    private lateinit var player: PlaylistPlayer
+    private lateinit var screen: ScreenPlayer
 
     private lateinit var setupView: View
     private lateinit var serverInput: EditText
@@ -58,12 +56,7 @@ class MainActivity : AppCompatActivity() {
 
         prefs = Prefs(this)
         cache = ContentCache(this)
-        player = PlaylistPlayer(
-            this,
-            view<ImageView>(R.id.image),
-            view<PlayerView>(R.id.video),
-            view(R.id.empty),
-        )
+        screen = ScreenPlayer(this, view(R.id.stage), view(R.id.empty))
         setupView = view(R.id.setup)
         serverInput = view(R.id.server_input)
         setupError = view(R.id.setup_error)
@@ -90,7 +83,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        player.release()
+        screen.release()
         super.onDestroy()
     }
 
@@ -132,7 +125,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     runFlow()
                 } finally {
-                    player.stop()
+                    screen.stop()
                 }
             }
         }
@@ -147,7 +140,7 @@ class MainActivity : AppCompatActivity() {
                 playLoop(api, token)
             } catch (e: UnpairedException) {
                 // Removed in the CMS: forget everything and show a fresh pairing code.
-                player.stop()
+                screen.stop()
                 prefs.unpair()
                 cache.prune(emptyList())
             }
@@ -207,17 +200,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Keeps the playlist in sync with the CMS and playing. Runs until cancelled or the device is unpaired. */
+    /** Keeps the content in sync with the CMS and playing. Runs until cancelled or the device is unpaired. */
     private suspend fun playLoop(api: ApiClient, token: String): Unit = coroutineScope {
         show(null)
-        var current: String? = null
+        var manifest: Manifest? = null
+        // What's on screen now: manifest version + program, so either changing restarts playback.
+        var showing: String? = null
+
+        fun showActive() {
+            val m = manifest ?: return
+            val program = m.activeProgram()
+            val key = m.version + "/" + program?.id
+            if (key == showing) return
+            val files = m.media.associateBy { it.mediaId }
+            screen.play(this, program) { id -> files[id]?.takeIf { cache.isCached(it) }?.let { cache.fileFor(it) } }
+            showing = key
+        }
 
         // Start straight away from what's on disk, so a reboot without network still shows content.
         prefs.manifestJson?.let { json ->
             val m = runCatching { Manifest.parse(json) }.getOrNull()
-            if (m != null && m.items.all { cache.isCached(it) }) {
-                player.play(this, playable(m))
-                current = m.version
+            if (m != null && m.media.all { cache.isCached(it) }) {
+                manifest = m
+                showActive()
             }
         }
 
@@ -227,17 +232,17 @@ class MainActivity : AppCompatActivity() {
                 val json = api.manifest(token)
                 val m = Manifest.parse(json)
                 pollSeconds = m.pollSeconds
-                if (m.version != current) {
-                    cache.sync(api, token, m.items) { done, total, bytes ->
+                if (m.version != manifest?.version) {
+                    cache.sync(api, token, m.media) { done, total, bytes ->
                         // Only show progress on a blank screen; never draw over live content.
-                        if (current == null) runOnUiThread {
+                        if (showing == null) runOnUiThread {
                             showStatus("Downloading ${done + 1} of $total (${bytes / 1_000_000} MB)")
                         }
                     }
                     prefs.manifestJson = json
-                    player.play(this, playable(m))
-                    cache.prune(m.items)
-                    current = m.version
+                    manifest = m
+                    showActive() // switch over before deleting files the old content used
+                    cache.prune(m.media)
                 }
                 hideStatus()
             } catch (e: CancellationException) {
@@ -245,17 +250,16 @@ class MainActivity : AppCompatActivity() {
             } catch (e: UnpairedException) {
                 throw e
             } catch (e: IOException) {
-                if (current == null) showStatus("Waiting for the server… ${e.message ?: ""}")
+                if (showing == null) showStatus("Waiting for the server… ${e.message ?: ""}")
                 pollSeconds = 15
             } catch (e: Exception) {
-                if (current == null) showStatus("Problem loading content: ${e.message}")
+                if (showing == null) showStatus("Problem loading content: ${e.message}")
                 pollSeconds = 15
             }
+            showActive()
             delay(pollSeconds * 1000L)
         }
     }
-
-    private fun playable(m: Manifest) = m.items.map { PlayableItem(it, cache.fileFor(it)) }
 
     private fun deviceInfo() = mapOf(
         "manufacturer" to Build.MANUFACTURER,

@@ -49,6 +49,22 @@ class HttpError extends Error {
   }
 }
 
+/** A playlist item resolved for the player. `kind` is image | video | text | web | youtube | stream. */
+interface ScreenItem {
+  id: string;
+  kind: string;
+  duration: number;
+  startAt: string | null;
+  endAt: string | null;
+  mediaId?: string;
+  text?: string;
+  color?: string;
+  background?: string;
+  scroll?: boolean;
+  url?: string;
+  videoId?: string;
+}
+
 // Express 5 forwards rejected promises to the error handler, so handlers can just throw.
 type Handler = (req: Request, res: Response) => unknown;
 
@@ -111,44 +127,131 @@ export function createApp(opts: AppOptions) {
     online: rest.lastSeen ? Date.now() - Date.parse(rest.lastSeen) < 2 * 60 * 1000 : false,
   });
 
+  const color = (v: unknown, fallback: string): string => {
+    if (v == null || v === "") return fallback;
+    if (typeof v !== "string" || !/^#[0-9a-fA-F]{6}$/.test(v)) throw new HttpError(400, "Colors must look like #1a2b3c");
+    return v.toLowerCase();
+  };
+
+  const localDateTime = (v: unknown, field: string): string | null => {
+    if (v == null || v === "") return null;
+    if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v)) {
+      throw new HttpError(400, `${field} must look like 2026-10-19T08:00`);
+    }
+    return v;
+  };
+
+  const httpUrl = (v: unknown, field: string): string => {
+    const s = str(v, field, 2000);
+    let u: URL;
+    try { u = new URL(s); } catch { throw new HttpError(400, `${field} is not a valid web address`); }
+    if (u.protocol !== "http:" && u.protocol !== "https:") throw new HttpError(400, `${field} must start with http:// or https://`);
+    return u.toString();
+  };
+
   const parseItems = (raw: unknown): PlaylistItem[] => {
     if (!Array.isArray(raw)) throw new HttpError(400, "items must be an array");
     return raw.map((it) => {
-      const mediaId = str(it?.mediaId, "items[].mediaId");
-      findOr404(db.media, mediaId, "Media");
       const duration = Number(it?.duration ?? 10);
       if (!Number.isFinite(duration) || duration < 1 || duration > 86400) {
         throw new HttpError(400, "items[].duration must be 1-86400 seconds");
       }
-      return { id: typeof it?.id === "string" ? it.id : id(), mediaId, duration: Math.round(duration) };
+      const base = {
+        id: typeof it?.id === "string" ? it.id : id(),
+        duration: Math.round(duration),
+        startAt: localDateTime(it?.startAt, "items[].startAt"),
+        endAt: localDateTime(it?.endAt, "items[].endAt"),
+      };
+      if (base.startAt && base.endAt && base.endAt <= base.startAt) {
+        throw new HttpError(400, "An item's end date must be after its start date");
+      }
+      const kind = it?.kind ?? "media";
+      switch (kind) {
+        case "media": {
+          const mediaId = str(it?.mediaId, "items[].mediaId");
+          findOr404(db.media, mediaId, "Media");
+          return { ...base, kind, mediaId };
+        }
+        case "text":
+          return {
+            ...base, kind,
+            text: str(it?.text, "items[].text", 1000),
+            color: color(it?.color, "#ffffff"),
+            background: color(it?.background, "#000000"),
+            scroll: Boolean(it?.scroll),
+          };
+        case "web":
+        case "stream":
+          return { ...base, kind, url: httpUrl(it?.url, "items[].url") };
+        default:
+          throw new HttpError(400, "items[].kind must be media, text, web or stream");
+      }
     });
   };
 
+  /** "https://youtu.be/abc" or "https://www.youtube.com/watch?v=abc" -> "abc" */
+  const youtubeId = (url: string): string | null => {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^(www|m)\./, "");
+    let vid: string | null = null;
+    if (host === "youtu.be") vid = u.pathname.slice(1);
+    else if (host === "youtube.com" || host === "youtube-nocookie.com") {
+      vid = u.searchParams.get("v") ?? u.pathname.match(/^\/(?:embed|shorts|live)\/([^/]+)/)?.[1] ?? null;
+    }
+    return vid && /^[\w-]{6,20}$/.test(vid) ? vid : null;
+  };
+
+  /** One playlist as the screen sees it: every item resolved to what the player needs. */
+  const screenItems = (playlist: Playlist | undefined): ScreenItem[] =>
+    (playlist?.items ?? []).flatMap((it): ScreenItem[] => {
+      const common = { id: it.id, duration: it.duration, startAt: it.startAt ?? null, endAt: it.endAt ?? null };
+      switch (it.kind) {
+        case "media": {
+          const m = db.media.find((x) => x.id === it.mediaId);
+          return m ? [{ ...common, kind: m.type, mediaId: m.id }] : [];
+        }
+        case "text":
+          return [{ ...common, kind: "text", text: it.text, color: it.color, background: it.background, scroll: !!it.scroll }];
+        case "web": {
+          const vid = youtubeId(it.url!);
+          return [vid ? { ...common, kind: "youtube", videoId: vid } : { ...common, kind: "web", url: it.url }];
+        }
+        case "stream":
+          return [{ ...common, kind: "stream", url: it.url }];
+        default:
+          return [];
+      }
+    });
+
+  const mediaFile = (m: Media) =>
+    ({ mediaId: m.id, type: m.type, mime: m.mime, size: m.size, sha256: m.sha256, url: `/api/player/media/${m.id}` });
+
   const manifestFor = (device: Device) => {
     const playlist = device.playlistId ? db.playlists.find((p) => p.id === device.playlistId) : undefined;
-    const items = (playlist?.items ?? []).flatMap((it) => {
-      const m = db.media.find((x) => x.id === it.mediaId);
-      if (!m) return [];
-      return [{
-        id: it.id,
-        mediaId: m.id,
-        type: m.type,
-        mime: m.mime,
-        size: m.size,
-        sha256: m.sha256,
-        duration: it.duration,
-        url: `/api/player/media/${m.id}`,
-      }];
-    });
+    // A "program" is what fills the whole screen: a list of zones, each looping its own items.
+    const programs = playlist
+      ? [{ id: `playlist:${playlist.id}`, name: playlist.name, zones: [{ id: "main", x: 0, y: 0, w: 100, h: 100, items: screenItems(playlist) }] }]
+      : [];
+    const mediaIds = new Set(programs.flatMap((p) => p.zones.flatMap((z) => z.items.flatMap((i) => (i.mediaId ? [i.mediaId] : [])))));
+    const media = db.media.filter((m) => mediaIds.has(m.id)).map(mediaFile);
+    const defaultProgram = programs[0]?.id ?? null;
     const version = crypto.createHash("sha256")
-      .update(JSON.stringify([device.name, playlist?.id, items]))
+      .update(JSON.stringify([device.name, programs, defaultProgram, media]))
       .digest("hex").slice(0, 16);
+    // Players from version 1.0 only understand `items`: images and videos of the main playlist.
+    const legacyItems = (playlist?.items ?? []).flatMap((it) => {
+      const m = it.kind === "media" ? db.media.find((x) => x.id === it.mediaId) : undefined;
+      return m ? [{ id: it.id, ...mediaFile(m), duration: it.duration }] : [];
+    });
     return {
       deviceId: device.id,
       deviceName: device.name,
       version,
       playlist: playlist ? { id: playlist.id, name: playlist.name } : null,
-      items,
+      items: legacyItems,
+      media,
+      programs,
+      defaultProgram,
       pollSeconds: 30,
     };
   };
@@ -225,7 +328,7 @@ export function createApp(opts: AppOptions) {
     db.media = db.media.filter((x) => x !== m);
     for (const p of db.playlists) {
       const before = p.items.length;
-      p.items = p.items.filter((it) => it.mediaId !== m.id);
+      p.items = p.items.filter((it) => it.kind !== "media" || it.mediaId !== m.id);
       if (p.items.length !== before) p.updatedAt = now();
     }
     fs.rmSync(path.join(mediaDir, m.filename), { force: true });

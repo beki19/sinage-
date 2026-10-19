@@ -6,24 +6,11 @@
     android:layout_height="match_parent"
     android:background="@color/bg">
 
-    <!-- Playback: one image view and one video view, the active one is visible. -->
-    <androidx.media3.ui.PlayerView
-        android:id="@+id/video"
+    <!-- Playback: one child per zone of the current playlist or layout, added in code. -->
+    <com.signage.player.ZoneLayout
+        android:id="@+id/stage"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:visibility="invisible"
-        app:resize_mode="fit"
-        app:shutter_background_color="@color/bg"
-        app:surface_type="surface_view"
-        app:use_controller="false" />
-
-    <ImageView
-        android:id="@+id/image"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:contentDescription="@null"
-        android:scaleType="fitCenter"
-        android:visibility="invisible" />
+        android:layout_height="match_parent" />
 
     <TextView
         android:id="@+id/empty"

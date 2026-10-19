@@ -12,6 +12,7 @@ function h(tag, attrs = {}, ...children) {
     if (v == null || v === false) continue;
     if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else if (k === "class") el.className = v;
+    else if (k === "value") el.value = v;
     else if (k in el && typeof v !== "string") el[k] = v;
     else el.setAttribute(k, v === true ? "" : v);
   }
@@ -197,11 +198,14 @@ function renderEditor() {
   const d = state.draft;
   if (!d) { box.replaceChildren(h("p", { class: "muted" }, "Pick or create a playlist.")); return; }
   const touch = () => { d.dirty = true; renderEditor(); };
+  // For typing: mark unsaved without re-rendering, so the text box keeps focus.
+  const soft = () => { d.dirty = true; saveBtn.disabled = false; };
   const mediaById = Object.fromEntries(state.media.map((m) => [m.id, m]));
-  const total = d.items.reduce((s, i) => s + (mediaById[i.mediaId]?.type === "video" ? 0 : i.duration), 0);
-  const hasVideo = d.items.some((i) => mediaById[i.mediaId]?.type === "video");
+  const isVideo = (i) => i.kind === "media" && mediaById[i.mediaId]?.type === "video";
+  const total = d.items.reduce((s, i) => s + (isVideo(i) ? 0 : i.duration), 0);
+  const hasVideo = d.items.some(isVideo);
 
-  const nameInput = h("input", { value: d.name, oninput: (e) => { d.name = e.target.value; d.dirty = true; saveBtn.disabled = false; } });
+  const nameInput = h("input", { value: d.name, oninput: (e) => { d.name = e.target.value; soft(); } });
   const saveBtn = h("button", { disabled: !d.dirty, onclick: savePlaylist }, "Save");
 
   box.replaceChildren(
@@ -213,37 +217,100 @@ function renderEditor() {
     h("p", { class: "muted" },
       `${d.items.length} item${d.items.length === 1 ? "" : "s"} · images total ${total}s${hasVideo ? " + videos" : ""}`,
       d.dirty ? " · unsaved changes" : ""),
-    h("ol", { class: "items" }, d.items.map((it, idx) => {
-      const m = mediaById[it.mediaId];
-      return h("li", { class: "item" },
-        h("span", { class: "num" }, idx + 1),
-        h("div", { class: "mini" }, m ? preview(m) : ""),
-        h("div", {}, h("div", {}, m?.name ?? "(missing)"), h("div", { class: "muted" }, m?.type === "video" ? "Video plays to the end" : "")),
-        m?.type === "video" ? h("span") : h("label", { class: "inline" },
-          h("input", { class: "dur", type: "number", min: 1, value: it.duration,
-            onchange: (e) => { it.duration = Math.max(1, Number(e.target.value) || 1); touch(); } }), "s"),
-        h("div", { class: "controls" },
-          h("button", { class: "ghost small", disabled: idx === 0, title: "Move up",
-            onclick: () => { [d.items[idx - 1], d.items[idx]] = [d.items[idx], d.items[idx - 1]]; touch(); } }, "↑"),
-          h("button", { class: "ghost small", disabled: idx === d.items.length - 1, title: "Move down",
-            onclick: () => { [d.items[idx + 1], d.items[idx]] = [d.items[idx], d.items[idx + 1]]; touch(); } }, "↓"),
-          h("button", { class: "danger small", title: "Remove", onclick: () => { d.items.splice(idx, 1); touch(); } }, "✕"),
-        ),
-      );
-    })),
-    h("h2", {}, "Add media"),
+    h("ol", { class: "items" }, d.items.map((it, idx) => h("li", { class: "item" },
+      h("span", { class: "num" }, idx + 1),
+      h("div", { class: "mini" }, itemThumb(it, mediaById)),
+      h("div", { class: "fields" }, itemFields(it, mediaById, soft), itemDates(it, soft)),
+      isVideo(it) ? h("span") : h("label", { class: "inline", title: "Seconds on screen" },
+        h("input", { class: "dur", type: "number", min: 1, value: it.duration,
+          onchange: (e) => { it.duration = Math.max(1, Number(e.target.value) || 1); touch(); } }), "s"),
+      h("div", { class: "controls" },
+        h("button", { class: "ghost small", disabled: idx === 0, title: "Move up",
+          onclick: () => { [d.items[idx - 1], d.items[idx]] = [d.items[idx], d.items[idx - 1]]; touch(); } }, "↑"),
+        h("button", { class: "ghost small", disabled: idx === d.items.length - 1, title: "Move down",
+          onclick: () => { [d.items[idx + 1], d.items[idx]] = [d.items[idx], d.items[idx + 1]]; touch(); } }, "↓"),
+        h("button", { class: "danger small", title: "Remove", onclick: () => { d.items.splice(idx, 1); touch(); } }, "✕"),
+      ),
+    ))),
+    h("h2", {}, "Add"),
+    h("div", { class: "inline wrap add-kinds" },
+      h("button", { class: "ghost", onclick: () => {
+        d.items.push({ kind: "text", text: "Your message here", color: "#ffffff", background: "#1f2937", scroll: false, duration: 10 });
+        touch();
+      } }, "+ Text or ticker"),
+      h("button", { class: "ghost", onclick: () => {
+        const url = prompt("Web page or YouTube link", "https://");
+        if (url && url !== "https://") { d.items.push({ kind: "web", url, duration: 30 }); touch(); }
+      } }, "+ Web page / YouTube"),
+      h("button", { class: "ghost", onclick: () => {
+        const url = prompt("Live stream address (HLS .m3u8 or a video URL)", "https://");
+        if (url && url !== "https://") { d.items.push({ kind: "stream", url, duration: 60 }); touch(); }
+      } }, "+ Live stream"),
+    ),
     state.media.length
       ? h("div", { class: "picker" }, state.media.map((m) =>
-          h("button", { title: `Add ${m.name}`, onclick: () => { d.items.push({ mediaId: m.id, duration: 10 }); touch(); } },
+          h("button", { title: `Add ${m.name}`, onclick: () => { d.items.push({ kind: "media", mediaId: m.id, duration: 10 }); touch(); } },
             h("div", { class: "mini" }, preview(m)), h("span", {}, `+ ${m.name}`))))
-      : h("p", { class: "muted" }, "Upload media in the Media tab first."),
+      : h("p", { class: "muted" }, "Upload images and videos in the Media tab to add them here."),
+  );
+}
+
+const isYoutube = (url) => /^https?:\/\/([\w-]+\.)?(youtube\.com|youtube-nocookie\.com|youtu\.be)\//i.test(url ?? "");
+
+function itemThumb(it, mediaById) {
+  if (it.kind === "media") return mediaById[it.mediaId] ? preview(mediaById[it.mediaId]) : "";
+  if (it.kind === "text") {
+    return h("div", { class: "glyph", style: `background:${it.background};color:${it.color}` }, it.scroll ? "ticker ›" : "Aa");
+  }
+  return h("div", { class: "glyph" }, it.kind === "stream" ? "LIVE" : isYoutube(it.url) ? "▶ YouTube" : "WEB");
+}
+
+function itemFields(it, mediaById, soft) {
+  switch (it.kind) {
+    case "media": {
+      const m = mediaById[it.mediaId];
+      return [h("div", {}, m?.name ?? "(missing)"), h("div", { class: "muted" }, m?.type === "video" ? "Video plays to the end" : "")];
+    }
+    case "text":
+      return [
+        h("textarea", { rows: 2, value: it.text, oninput: (e) => { it.text = e.target.value; soft(); } }),
+        h("div", { class: "inline wrap small-text" },
+          h("label", { class: "inline" }, "Text", h("input", { type: "color", value: it.color, oninput: (e) => { it.color = e.target.value; soft(); } })),
+          h("label", { class: "inline" }, "Background", h("input", { type: "color", value: it.background, oninput: (e) => { it.background = e.target.value; soft(); } })),
+          h("label", { class: "inline" }, h("input", { type: "checkbox", checked: !!it.scroll, onchange: (e) => { it.scroll = e.target.checked; soft(); } }), "Scroll as a ticker"),
+        ),
+      ];
+    case "web":
+    case "stream":
+      return [
+        h("input", { type: "url", value: it.url, placeholder: "https://…", oninput: (e) => { it.url = e.target.value; soft(); } }),
+        h("div", { class: "muted small-text" }, it.kind === "stream"
+          ? "Live stream (HLS .m3u8 or a video URL). Plays nonstop if it's the only item."
+          : "Web page, or a YouTube link (plays muted). Needs internet on the screen."),
+      ];
+    default:
+      return h("div", { class: "muted" }, `Unknown item (${it.kind})`);
+  }
+}
+
+/** Optional "only show between" window, in each screen's own local time. */
+function itemDates(it, soft) {
+  const has = it.startAt || it.endAt;
+  return h("details", { class: "dates", open: !!has },
+    h("summary", { class: "small-text" }, has ? `Showing ${it.startAt ? "from " + it.startAt.replace("T", " ") : ""} ${it.endAt ? "until " + it.endAt.replace("T", " ") : ""}` : "Start / end date"),
+    h("div", { class: "inline wrap small-text" },
+      h("label", { class: "inline" }, "From", h("input", { type: "datetime-local", value: it.startAt ?? "",
+        onchange: (e) => { it.startAt = e.target.value || null; soft(); } })),
+      h("label", { class: "inline" }, "Until", h("input", { type: "datetime-local", value: it.endAt ?? "",
+        onchange: (e) => { it.endAt = e.target.value || null; soft(); } })),
+    ),
   );
 }
 
 async function savePlaylist() {
   const d = state.draft;
   try {
-    await api("PUT", `/api/playlists/${d.id}`, { name: d.name, items: d.items.map(({ id, mediaId, duration }) => ({ id, mediaId, duration })) });
+    await api("PUT", `/api/playlists/${d.id}`, { name: d.name, items: d.items });
     d.dirty = false;
     await loadPlaylists();
     selectPlaylist(d.id);
