@@ -102,26 +102,184 @@ document.querySelectorAll("header nav button").forEach((btn) =>
 
 // ---------- dashboard ----------
 
+/** SVG element builder, like h() but in the SVG namespace. */
+function s(tag, attrs = {}, ...children) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) if (v != null) el.setAttribute(k, v);
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) el.append(c);
+  return el;
+}
+
+const pct = (x) => (x == null ? "—" : `${Math.round(x * 100)}%`);
+const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const fmtDay = (iso) => new Date(iso).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+
+/**
+ * Column chart for one series. values: numbers (or null for no data), max: top of the y-axis,
+ * ticks: y gridline values, label(v): tick text, tip(i, v): tooltip, xLabels: [index, text][].
+ */
+function columnChart({ values, max, ticks, label, tip, xLabels, height = 180, width = 640 }) {
+  const W = width, H = height, L = 36, R = 6, T = 8, B = 22;
+  const plotW = W - L - R, plotH = H - T - B;
+  const band = plotW / values.length;
+  const barW = Math.min(24, band - 2);
+  const y = (v) => T + plotH - (v / max) * plotH;
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img" },
+    ticks.map((t) => [
+      s("line", { x1: L, x2: W - R, y1: y(t), y2: y(t), class: t === 0 ? "axis" : "gridline" }),
+      s("text", { x: L - 6, y: y(t) + 4, class: "tick", "text-anchor": "end" }, label(t)),
+    ]),
+    values.map((v, i) => {
+      const x = L + i * band + (band - barW) / 2;
+      const hit = s("rect", { x: L + i * band, y: T, width: band, height: plotH, class: "hit", "data-tip": tip(i, v) });
+      if (v == null || v <= 0) return hit;
+      const top = y(v), r = Math.min(4, barW / 2, (T + plotH - top));
+      // Rounded at the data end, square at the baseline.
+      const d = `M${x},${T + plotH} V${top + r} Q${x},${top} ${x + r},${top} H${x + barW - r} Q${x + barW},${top} ${x + barW},${top + r} V${T + plotH} Z`;
+      return [s("path", { d, class: "bar" }), hit];
+    }),
+    xLabels.map(([i, text]) => s("text", { x: L + i * band + band / 2, y: H - 6, class: "tick", "text-anchor": "middle" }, text)),
+  );
+  return svg;
+}
+
+/** Horizontal bars for one series, value at the tip. */
+function barList(rows, { unit = "", empty = "Nothing yet." } = {}) {
+  if (!rows.length) return h("p", { class: "muted small-text" }, empty);
+  const max = Math.max(...rows.map((r) => r.n), 1);
+  return h("div", { class: "barlist" }, rows.map((r) => h("div", { class: "barrow", "data-tip": `${r.label}: ${r.n}${unit}` },
+    h("span", { class: "barlabel", title: r.label }, r.label),
+    h("span", { class: "bartrack" }, h("span", { class: "barfill", style: `width:${Math.max(2, (r.n / max) * 100)}%` })),
+    h("span", { class: "barvalue" }, `${r.n}${unit}`))));
+}
+
+const uptimeClass = (v) => (v == null ? "none" : v === 0 ? "u0" : v < 0.5 ? "u1" : v < 0.9 ? "u2" : "u3");
+
+function renderDashboard(d) {
+  $("#dash-updated").textContent = `Updated ${fmtTime(d.generatedAt)} · refreshes every 10 seconds`;
+
+  // Hero: the one number that matters most.
+  const share = d.screens.total ? d.screens.online / d.screens.total : null;
+  const statusWord = !d.screens.total ? "No screens yet" : !d.screens.offline ? "All screens online" : `${d.screens.offline} offline`;
+  $("#hero").replaceChildren(
+    h("div", { class: "hero-label" }, "Screens online now"),
+    h("div", { class: "hero-value" }, share == null ? "—" : pct(share)),
+    h("div", { class: "hero-sub" },
+      h("span", { class: `status-pill ${!d.screens.total ? "" : d.screens.offline ? "critical" : "good"}` },
+        h("span", { class: "status-icon" }, !d.screens.total ? "•" : d.screens.offline ? "!" : "✓"), statusWord),
+      h("span", { class: "muted" }, `${d.screens.online} of ${d.screens.total} screens`)),
+    h("div", { class: "meter", "data-tip": `${d.screens.online} online, ${d.screens.offline} offline` },
+      h("span", { class: "meter-on", style: `width:${(share ?? 0) * 100}%` })),
+  );
+
+  const tile = (label, value, note) => h("div", { class: "stat card" },
+    h("div", { class: "stat-label" }, label), h("div", { class: "stat-value" }, value), note ? h("div", { class: "small-text muted" }, note) : null);
+  $("#stats").replaceChildren(
+    tile("Uptime, last 24 h", pct(d.uptime24h), "Average across screens"),
+    tile("Content items", String(d.counts.items), `${d.counts.playlists} playlists · ${d.counts.layouts} layouts`),
+    tile("Media library", fmtSize(d.media.bytes), `${d.media.count} file${d.media.count === 1 ? "" : "s"}`),
+    tile("On a schedule", `${d.counts.scheduled} / ${d.screens.total}`, `${d.counts.groups} group${d.counts.groups === 1 ? "" : "s"} · ${d.counts.users} user${d.counts.users === 1 ? "" : "s"}`),
+  );
+
+  // Fleet uptime columns, one per hour.
+  const hourStart = (i) => Date.parse(d.generatedAt) - (24 - i) * 3600_000;
+  $("#uptime-chart").replaceChildren(d.screens.total
+    ? columnChart({
+        values: d.fleetHourly, max: 1, ticks: [0, 0.5, 1], label: (t) => `${t * 100}%`,
+        tip: (i, v) => `${fmtTime(new Date(hourStart(i)).toISOString())}–${fmtTime(new Date(hourStart(i + 1)).toISOString())}: ${v == null ? "no screens yet" : `${pct(v)} online`}`,
+        xLabels: [[0, "24 h ago"], [6, "18 h"], [12, "12 h"], [18, "6 h"], [23, "now"]],
+        // Draw at the box's real width so labels stay at their true size on phones.
+        width: Math.max(300, $("#uptime-chart").clientWidth || 640),
+      })
+    : h("p", { class: "muted" }, "Pair a screen to start tracking uptime."));
+
+  // Attention list.
+  const icons = { critical: "!", warning: "▲", info: "i" };
+  $("#attention").replaceChildren(...(d.attention.length
+    ? d.attention.map((a) => h("li", { class: a.level }, h("span", { class: "status-icon" }, icons[a.level]), h("span", {}, a.text)))
+    : [h("li", { class: "good" }, h("span", { class: "status-icon" }, "✓"), h("span", {}, "All good. Nothing needs attention."))]));
+
+  // Status board.
+  $("#screen-board").replaceChildren(d.screenList.length
+    ? h("div", { class: "board" },
+        h("div", { class: "board-row board-head" },
+          ["Screen", "Showing now", "Last 24 hours", "Uptime", "Last seen", "Player"].map((t) => h("span", {}, t))),
+        d.screenList.map((x) => h("div", { class: "board-row" },
+          h("span", { class: "board-name" },
+            h("span", { class: `status-pill small ${x.online ? "good" : "critical"}` }, h("span", { class: "status-icon" }, x.online ? "✓" : "!"), x.online ? "Online" : "Offline"),
+            h("strong", {}, x.name), x.group ? h("span", { class: "muted small-text" }, `Group: ${x.group}`) : null),
+          h("span", { class: x.nowShowing ? "" : "muted" }, x.nowShowing ?? "Nothing assigned"),
+          h("span", { class: "strip" }, x.hourly.map((v, i) => h("span", {
+            class: `cell ${uptimeClass(v)}`,
+            "data-tip": `${x.name}, ${fmtTime(new Date(hourStart(i)).toISOString())}: ${v == null ? "not paired yet" : `${pct(v)} of the hour online`}`,
+          }))),
+          h("span", { class: "num" }, pct(x.uptime24h)),
+          h("span", { class: "muted small-text" }, x.online ? "now" : fmtAgo(x.lastSeen)),
+          h("span", { class: "muted small-text" }, x.appVersion ? `v${x.appVersion}` : "—", x.model ? h("div", {}, x.model) : null),
+        )),
+        h("div", { class: "legend small-text muted" }, "Hour online:",
+          [["u3", "90%+"], ["u2", "50–90%"], ["u1", "under 50%"], ["u0", "offline"], ["none", "not paired"]].map(([c, t]) =>
+            h("span", { class: "legend-item" }, h("span", { class: `cell ${c}` }), t))),
+      )
+    : h("p", { class: "muted" }, "No screens yet. Pair one in the Screens tab."));
+
+  $("#content-mix").replaceChildren(barList(d.contentMix.map((m) => ({ label: m.label, n: m.n })), { empty: "Add items to a playlist to see the mix." }));
+  $("#most-used").replaceChildren(barList(d.mostUsed.map((m) => ({ label: `${m.name} (${m.kind})`, n: m.screens })), { empty: "Assign content to a screen to see this." }));
+
+  // Storage: one stacked bar, images then videos, with a legend.
+  const total = d.media.images + d.media.videos;
+  $("#storage").replaceChildren(total
+    ? h("div", {},
+        h("div", { class: "stack" },
+          d.media.images ? h("span", { class: "seg s1", style: `flex:${d.media.images}`, "data-tip": `Images: ${fmtSize(d.media.images)}` }) : null,
+          d.media.videos ? h("span", { class: "seg s2", style: `flex:${d.media.videos}`, "data-tip": `Videos: ${fmtSize(d.media.videos)}` }) : null),
+        h("div", { class: "legend small-text" },
+          h("span", { class: "legend-item" }, h("span", { class: "key s1" }), `Images ${fmtSize(d.media.images)}`),
+          h("span", { class: "legend-item" }, h("span", { class: "key s2" }), `Videos ${fmtSize(d.media.videos)}`)))
+    : h("p", { class: "muted small-text" }, "No media uploaded yet."));
+  $("#versions").replaceChildren(barList(d.versions.map((v) => ({ label: v.version === "unknown" ? "Unknown" : `v${v.version}${v.latest ? " (newest)" : ""}`, n: v.n })), { empty: "No screens yet." }));
+
+  // Coming up: schedule switches and dated items, in time order.
+  const upcoming = [
+    ...d.upcoming.map((u) => ({ at: u.at, when: `${fmtDay(u.at)} ${fmtTime(u.at)}`, text: `${u.screen} switches to ${u.to ?? "nothing"}`, sub: u.from ? `from ${u.from}` : "" })),
+    ...d.dated.map((x) => ({ at: x.at, when: `${fmtDay(x.at)} ${x.at.slice(11)}`, text: `"${x.item}" ${x.type === "starts" ? "starts showing" : "stops showing"}`, sub: `in ${x.playlist}` })),
+  ].sort((a, b) => a.at.localeCompare(b.at)).slice(0, 10);
+  $("#upcoming").replaceChildren(...(upcoming.length
+    ? upcoming.map((u) => h("li", {}, h("span", { class: "when" }, u.when), h("span", {}, u.text, u.sub ? h("span", { class: "muted small-text" }, ` ${u.sub}`) : null)))
+    : [h("li", { class: "muted" }, "Nothing scheduled to change. Add time slots or start/end dates to see them here.")]));
+
+  const maxDay = Math.max(1, ...d.days.map((x) => x.offline));
+  const step = maxDay <= 4 ? 1 : Math.ceil(maxDay / 4);
+  $("#activity-chart").replaceChildren(columnChart({
+    values: d.days.map((x) => x.offline), max: Math.ceil(maxDay / step) * step,
+    ticks: Array.from({ length: Math.ceil(maxDay / step) + 1 }, (_, i) => i * step), label: (t) => String(t),
+    tip: (i, v) => `${fmtDay(d.days[i].day + "T12:00:00")}: went offline ${v} time${v === 1 ? "" : "s"}, came back ${d.days[i].online}`,
+    xLabels: d.days.map((x, i) => [i, new Date(x.day + "T12:00:00").toLocaleDateString([], { weekday: "short" })]), height: 190, width: Math.max(300, $("#activity-chart").clientWidth || 380),
+  }));
+
+  $("#event-list").replaceChildren(...(d.events.length
+    ? d.events.slice(0, 10).map((e) => h("li", {},
+        h("span", { class: "when" }, fmtAgo(e.at)),
+        h("span", {}, h("span", { class: `status-pill small ${e.type === "online" ? "good" : "critical"}` },
+          h("span", { class: "status-icon" }, e.type === "online" ? "✓" : "!"), e.type === "online" ? "Back" : "Offline"), ` ${e.deviceName}`)))
+    : [h("li", { class: "muted" }, "Screens going offline and coming back will show up here.")]));
+}
+
+// One tooltip for every chart mark: anything with data-tip shows it on hover.
+document.addEventListener("pointermove", (e) => {
+  const tip = $("#viz-tip");
+  const el = e.target.closest?.("[data-tip]");
+  if (!el || $("#tab-dashboard").hidden) { tip.hidden = true; return; }
+  tip.textContent = el.getAttribute("data-tip");
+  tip.hidden = false;
+  const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  const y = e.clientY + 16 + tip.offsetHeight > window.innerHeight ? e.clientY - tip.offsetHeight - 10 : e.clientY + 16;
+  tip.style.transform = `translate(${x}px, ${y}px)`;
+});
+
 async function loadDashboard() {
   const d = await api("GET", "/api/dashboard");
-  const stat = (label, value, note, cls = "") => h("div", { class: `stat card ${cls}` },
-    h("div", { class: "stat-value" }, value), h("div", { class: "stat-label" }, label), note ? h("div", { class: "small-text muted" }, note) : null);
-  $("#stats").replaceChildren(
-    stat("Screens online", `${d.screens.online} / ${d.screens.total}`, d.screens.total ? null : "Pair one in the Screens tab", d.screens.total && !d.screens.offline ? "good" : ""),
-    stat("Offline", String(d.screens.offline), d.alertsOn ? "Alerts on" : "Alerts off", d.screens.offline ? "bad" : ""),
-    stat("Media", String(d.media.count), fmtSize(d.media.bytes)),
-    stat("Playlists · layouts", `${d.counts.playlists} · ${d.counts.layouts}`, `${d.counts.groups} group${d.counts.groups === 1 ? "" : "s"}`),
-  );
-  $("#offline-list").replaceChildren(d.offline.length
-    ? h("ul", { class: "plain" }, d.offline.map((s) => h("li", {},
-        h("span", { class: "dot off" }), h("strong", {}, s.name), h("span", { class: "muted" }, ` · last seen ${fmtAgo(s.lastSeen)}`))))
-    : h("p", { class: "muted" }, d.screens.total ? "All screens are online." : "No screens yet."));
-  $("#event-list").replaceChildren(d.events.length
-    ? h("ul", { class: "plain" }, d.events.slice(0, 15).map((e) => h("li", {},
-        h("span", { class: `dot ${e.type === "online" ? "on" : "off"}` }),
-        `${e.deviceName} ${e.type === "online" ? "came back online" : "went offline"}`,
-        h("span", { class: "muted" }, ` · ${fmtAgo(e.at)}`))))
-    : h("p", { class: "muted" }, "Screens going offline and coming back will show up here."));
+  renderDashboard(d);
   if (state.me?.role === "admin") {
     const s = await api("GET", "/api/settings");
     const f = $("#alert-settings");

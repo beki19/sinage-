@@ -111,6 +111,8 @@ export interface Device {
   lastCommandResult: { type: CommandType; ok: boolean; message: string; at: string } | null;
   /** When the latest screenshot (data/screenshots/<id>.jpg) arrived. */
   screenshotAt: string | null;
+  /** 10-minute buckets (time / 10 min) in which the screen checked in, last 7 days. */
+  seen?: number[];
   /** Last state the alert checker saw, so it alerts once per change. null until first checked. */
   alertState: "online" | "offline" | null;
   pairedAt: string;

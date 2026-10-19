@@ -466,3 +466,26 @@ test("layout zones can show a source directly: YouTube channel, X, clock", async
   assert.match(z[1].items[0].html, /twitter\.com\/dwnews/);
   assert.match(z[2].items[0].html, /Africa\/Addis_Ababa/);
 });
+
+test("dashboard charts data: uptime history, status board, content mix, upcoming changes", async () => {
+  const a = (await api("POST", "/api/playlists", { name: "Dash A", items: [{ kind: "text", text: "a" }] }, admin)).json;
+  const b = (await api("POST", "/api/playlists", { name: "Dash B", items: [{ kind: "text", text: "b", scroll: true }] }, admin)).json;
+  const screen = await pairScreen("Dash TV", { playlistId: a.id });
+  // A slot starting in about two hours, every day.
+  const at = new Date(Date.now() + 2 * 3600_000);
+  const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  await api("PATCH", `/api/devices/${screen.id}`, { schedule: [{ days: [0, 1, 2, 3, 4, 5, 6], start: hhmm(at), end: hhmm(new Date(at.getTime() + 3600_000)), playlistId: b.id }] }, admin);
+  await api("GET", "/api/player/manifest", undefined, screen.auth);
+
+  const d = (await api("GET", "/api/dashboard", undefined, admin)).json;
+  assert.equal(d.fleetHourly.length, 24);
+  const row = d.screenList.find((x: { name: string }) => x.name === "Dash TV");
+  assert.equal(row.hourly.length, 24);
+  assert.ok(row.hourly[23] > 0, "the current hour shows the check-in");
+  assert.equal(row.nowShowing, "Dash A");
+  assert.ok(d.contentMix.some((m: { label: string }) => m.label === "Tickers"));
+  const next = d.upcoming.find((u: { screen: string }) => u.screen === "Dash TV");
+  assert.equal(next.to, "Dash B");
+  assert.ok(Math.abs(Date.parse(next.at) - at.getTime()) < 61_000);
+  assert.ok(Array.isArray(d.attention));
+});

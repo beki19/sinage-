@@ -35,17 +35,55 @@
     <main>
       <p class="viewer-note card">You're signed in with a view-only account. Ask an admin if you need to make changes.</p>
       <section id="tab-dashboard" class="tab">
-        <div id="stats" class="stats"></div>
-        <div class="split-even">
-          <div class="card">
-            <h2>Offline screens</h2>
-            <div id="offline-list"></div>
-          </div>
-          <div class="card">
-            <h2>Recent activity</h2>
-            <div id="event-list"></div>
+        <div class="dash-head">
+          <div>
+            <h1>Overview</h1>
+            <p class="muted small-text" id="dash-updated"></p>
           </div>
         </div>
+        <div class="dash-grid viz-root">
+          <div id="hero" class="card hero span-2"></div>
+          <div id="stats" class="stats span-2"></div>
+          <div class="card span-3">
+            <div class="card-head"><h2>Fleet uptime</h2><span class="muted small-text">Share of screens checking in, last 24 hours</span></div>
+            <div id="uptime-chart"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>Needs attention</h2></div>
+            <ul id="attention" class="attention"></ul>
+          </div>
+          <div class="card span-4">
+            <div class="card-head"><h2>Screen status</h2><span class="muted small-text">Each square is one hour of the last 24</span></div>
+            <div id="screen-board"></div>
+          </div>
+          <div class="card span-2">
+            <div class="card-head"><h2>Content mix</h2><span class="muted small-text">Items in playlists and layout zones</span></div>
+            <div id="content-mix"></div>
+          </div>
+          <div class="card span-2">
+            <div class="card-head"><h2>Most shown</h2><span class="muted small-text">Screens showing each playlist or layout</span></div>
+            <div id="most-used"></div>
+          </div>
+          <div class="card span-2">
+            <div class="card-head"><h2>Storage</h2></div>
+            <div id="storage"></div>
+            <div class="card-head sub"><h2>Player versions</h2></div>
+            <div id="versions"></div>
+          </div>
+          <div class="card span-2">
+            <div class="card-head"><h2>Coming up</h2><span class="muted small-text">Next 24 hours of schedules, and the next 7 days of dated items</span></div>
+            <ul id="upcoming" class="timeline"></ul>
+          </div>
+          <div class="card span-2">
+            <div class="card-head"><h2>Screens going offline</h2><span class="muted small-text">Times per day, last 7 days</span></div>
+            <div id="activity-chart"></div>
+          </div>
+          <div class="card span-2">
+            <div class="card-head"><h2>Recent activity</h2></div>
+            <ul id="event-list" class="timeline"></ul>
+          </div>
+        </div>
+        <div id="viz-tip" class="viz-tip" hidden></div>
         <form id="alert-settings" class="card admin-only">
           <h2>Offline alerts</h2>
           <p class="muted small-text">

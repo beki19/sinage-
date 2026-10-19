@@ -187,7 +187,7 @@ export function createApp(opts: AppOptions) {
   };
 
   const publicDevice = (device: Device) => {
-    const { token: _t, ...rest } = device;
+    const { token: _t, seen: _s, ...rest } = device;
     return {
       ...rest,
       online: rest.lastSeen ? Date.now() - Date.parse(rest.lastSeen) < 2 * 60 * 1000 : false,
@@ -1031,16 +1031,163 @@ export function createApp(opts: AppOptions) {
   };
   setInterval(() => void checkAlerts(), 30_000).unref();
 
+  /** Check-ins are remembered in 10-minute buckets for a week, for the uptime charts. */
+  const SEEN_BUCKET_MS = 10 * 60 * 1000;
+  const BUCKETS_PER_HOUR = 6;
+  const SEEN_KEEP = 7 * 24 * BUCKETS_PER_HOUR;
+
+  const recordSeen = (d: Device, nowMs: number) => {
+    const b = Math.floor(nowMs / SEEN_BUCKET_MS);
+    d.seen ??= [];
+    if (d.seen[d.seen.length - 1] !== b) {
+      d.seen.push(b);
+      if (d.seen.length > SEEN_KEEP) d.seen.splice(0, d.seen.length - SEEN_KEEP);
+    }
+  };
+
+  /** Share of each hour a screen was checking in, oldest first; null for hours before it was paired. */
+  const hourlyUptime = (d: Device, hours: number, nowMs: number): (number | null)[] => {
+    const seen = new Set(d.seen ?? []);
+    const nowBucket = Math.floor(nowMs / SEEN_BUCKET_MS);
+    const paired = Date.parse(d.pairedAt);
+    const out: (number | null)[] = [];
+    for (let hr = hours - 1; hr >= 0; hr--) {
+      const last = nowBucket - hr * BUCKETS_PER_HOUR;
+      const first = last - BUCKETS_PER_HOUR + 1;
+      if ((last + 1) * SEEN_BUCKET_MS <= paired) { out.push(null); continue; }
+      let n = 0;
+      for (let b = first; b <= last; b++) if (seen.has(b)) n++;
+      out.push(Math.min(1, n / BUCKETS_PER_HOUR));
+    }
+    return out;
+  };
+
+  /** What kind of thing an item is, in words for the content mix chart. */
+  const itemKindLabel = (it: PlaylistItem): string => {
+    switch (it.kind) {
+      case "media": return db.media.find((m) => m.id === it.mediaId)?.type === "video" ? "Videos" : "Images";
+      case "web": {
+        const yt = youtubeIds(it.url!);
+        return yt?.channelId ? "Live TV channels" : yt ? "YouTube" : "Web pages";
+      }
+      case "stream": return "Live streams";
+      case "text": return it.scroll ? "Tickers" : "Text slides";
+      case "clock": return "World clocks";
+      case "feed": return "News feeds";
+      case "x": return "X posts";
+      default: return "Other";
+    }
+  };
+
+  const versionNum = (v: string) => v.split(".").map((p) => Number(p) || 0).reduce((s, p) => s * 1000 + p, 0);
+
   app.get("/api/dashboard", requireLogin, route((_req, res) => {
-    const screens = db.devices.map(publicDevice);
-    const offline = screens.filter((d) => !d.online)
-      .sort((a, b) => (b.lastSeen ?? "").localeCompare(a.lastSeen ?? ""))
-      .map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen }));
+    const nowMs = Date.now();
+    const screens = db.devices.map((d) => {
+      const pub = publicDevice(d);
+      const hourly = hourlyUptime(d, 24, nowMs);
+      const known = hourly.filter((x): x is number => x !== null);
+      const group = d.groupId ? db.groups.find((g) => g.id === d.groupId)?.name ?? null : null;
+      return {
+        id: d.id, name: d.name, online: pub.online, lastSeen: d.lastSeen, nowShowing: pub.nowShowing, group,
+        appVersion: d.info.appVersion ?? null, model: [d.info.manufacturer, d.info.model].filter(Boolean).join(" ") || null,
+        screenshotAt: d.screenshotAt, hourly, uptime24h: known.length ? known.reduce((s, x) => s + x, 0) / known.length : null,
+      };
+    });
+    const online = screens.filter((s) => s.online).length;
+
+    // Fleet uptime per hour: the average over screens that existed that hour.
+    const fleetHourly = Array.from({ length: 24 }, (_, i) => {
+      const vals = screens.map((s) => s.hourly[i]).filter((x): x is number => x !== null);
+      return vals.length ? vals.reduce((s, x) => s + x, 0) / vals.length : null;
+    });
+    const knownFleet = fleetHourly.filter((x): x is number => x !== null);
+
+    // Next change of content per screen in the coming 24 hours, by the server's clock.
+    const upcoming = db.devices.flatMap((d) => {
+      const a = assignmentOf(d);
+      if (!a.schedule.length) return [];
+      const current = activeRef(a, new Date(nowMs));
+      const firstMinute = Math.ceil(nowMs / 60_000) * 60_000;
+      for (let m = 0; m <= 24 * 60; m++) {
+        const at = new Date(firstMinute + m * 60_000);
+        const next = activeRef(a, at);
+        if (next !== current) return [{ screen: d.name, at: at.toISOString(), from: refName(current), to: refName(next) }];
+      }
+      return [];
+    }).sort((x, y) => x.at.localeCompare(y.at)).slice(0, 8);
+
+    // Items starting or ending within a week (local date-times compared as text, like the screens do).
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const local = (t: number) => { const x = new Date(t); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}T${pad(x.getHours())}:${pad(x.getMinutes())}`; };
+    const nowLocal = local(nowMs);
+    const weekLocal = local(nowMs + 7 * 86_400_000);
+    const dated = db.playlists.flatMap((p) => p.items.flatMap((it) => {
+      const label = it.kind === "media" ? db.media.find((m) => m.id === it.mediaId)?.name ?? "Media"
+        : it.kind === "text" ? (it.text ?? "").slice(0, 40) : itemKindLabel(it).replace(/s$/, "");
+      const out = [];
+      if (it.startAt && it.startAt > nowLocal && it.startAt <= weekLocal) out.push({ playlist: p.name, item: label, type: "starts", at: it.startAt });
+      if (it.endAt && it.endAt > nowLocal && it.endAt <= weekLocal) out.push({ playlist: p.name, item: label, type: "ends", at: it.endAt });
+      return out;
+    })).sort((x, y) => x.at.localeCompare(y.at)).slice(0, 8);
+
+    // Content mix across playlists and layout zones.
+    const mix = new Map<string, number>();
+    for (const it of allItems()) mix.set(itemKindLabel(it), (mix.get(itemKindLabel(it)) ?? 0) + 1);
+
+    // What screens show by default, most used first.
+    const usage = new Map<string, number>();
+    for (const d of db.devices) {
+      const ref = contentRef(assignmentOf(d));
+      if (ref) usage.set(ref, (usage.get(ref) ?? 0) + 1);
+    }
+    const mostUsed = [...usage].map(([ref, n]) => ({ name: refName(ref), kind: ref.split(":")[0], screens: n }))
+      .sort((x, y) => y.screens - x.screens).slice(0, 6);
+
+    const versions = new Map<string, number>();
+    for (const s of screens) versions.set(s.appVersion ?? "unknown", (versions.get(s.appVersion ?? "unknown") ?? 0) + 1);
+    const newest = [...versions.keys()].filter((v) => v !== "unknown").sort((x, y) => versionNum(y) - versionNum(x))[0];
+
+    // Offline events per day, last 7 days.
+    const days = Array.from({ length: 7 }, (_, i) => {
+      const day = new Date(nowMs - (6 - i) * 86_400_000).toISOString().slice(0, 10);
+      const evs = db.events.filter((e) => e.at.startsWith(day));
+      return { day, offline: evs.filter((e) => e.type === "offline").length, online: evs.filter((e) => e.type === "online").length };
+    });
+
+    // Things worth a look, most serious first.
+    const attention: { level: "critical" | "warning" | "info"; text: string }[] = [];
+    const off = screens.filter((s) => !s.online);
+    if (off.length) attention.push({ level: "critical", text: `${off.length} screen${off.length === 1 ? " is" : "s are"} offline: ${off.map((s) => s.name).join(", ")}` });
+    const blank = screens.filter((s) => !s.nowShowing);
+    if (blank.length) attention.push({ level: "warning", text: `Nothing assigned to ${blank.map((s) => s.name).join(", ")}` });
+    const old = newest ? screens.filter((s) => s.appVersion && versionNum(s.appVersion) < versionNum(newest)) : [];
+    if (old.length) attention.push({ level: "warning", text: `${old.length} screen${old.length === 1 ? " runs" : "s run"} an older player than ${newest}: ${old.map((s) => s.name).join(", ")}` });
+    if (opts.adminPassword === "admin") attention.push({ level: "warning", text: "The built-in admin still uses the default password. Set ADMIN_PASSWORD when starting the server." });
+    if (!db.settings.alertWebhookUrl) attention.push({ level: "info", text: "Offline alerts are off. Add an alert address below to get notified." });
+    const ending = dated.filter((x) => x.type === "ends").length;
+    if (ending) attention.push({ level: "info", text: `${ending} item${ending === 1 ? "" : "s"} stop${ending === 1 ? "s" : ""} showing within a week` });
+
+    const bytes = (type: string) => db.media.filter((m) => m.type === type).reduce((s, m) => s + m.size, 0);
     res.json({
-      screens: { total: screens.length, online: screens.length - offline.length, offline: offline.length },
-      offline,
-      media: { count: db.media.length, bytes: db.media.reduce((s, m) => s + m.size, 0) },
-      counts: { playlists: db.playlists.length, layouts: db.layouts.length, groups: db.groups.length, users: db.users.length + 1 },
+      generatedAt: new Date(nowMs).toISOString(),
+      screens: { total: screens.length, online, offline: screens.length - online },
+      uptime24h: knownFleet.length ? knownFleet.reduce((s, x) => s + x, 0) / knownFleet.length : null,
+      fleetHourly,
+      screenList: screens.sort((x, y) => Number(x.online) - Number(y.online) || x.name.localeCompare(y.name)),
+      offline: off.map((s) => ({ id: s.id, name: s.name, lastSeen: s.lastSeen })),
+      media: { count: db.media.length, bytes: bytes("image") + bytes("video"), images: bytes("image"), videos: bytes("video") },
+      counts: {
+        playlists: db.playlists.length, layouts: db.layouts.length, groups: db.groups.length, users: db.users.length + 1,
+        items: allItems().length, scheduled: db.devices.filter((d) => assignmentOf(d).schedule.length).length,
+      },
+      contentMix: [...mix].map(([label, n]) => ({ label, n })).sort((x, y) => y.n - x.n),
+      mostUsed,
+      versions: [...versions].map(([version, n]) => ({ version, n, latest: version === newest })).sort((x, y) => y.n - x.n),
+      upcoming,
+      dated,
+      days,
+      attention,
       events: db.events.slice(0, 50),
       alertsOn: !!db.settings.alertWebhookUrl,
     });
@@ -1109,6 +1256,7 @@ export function createApp(opts: AppOptions) {
   app.get("/api/player/manifest", requireDevice, route((req, res) => {
     const device = res.locals.device as Device;
     device.lastSeen = now();
+    recordSeen(device, Date.now());
     const appVersion = req.header("x-player-version");
     if (appVersion) device.info.appVersion = appVersion.slice(0, 50);
     store.saveSoon();
