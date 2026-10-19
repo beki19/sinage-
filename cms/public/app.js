@@ -4,7 +4,7 @@
 
 const state = {
   token: localStorage.getItem("token"),
-  media: [], playlists: [], layouts: [], devices: [],
+  media: [], playlists: [], layouts: [], devices: [], groups: [],
   selectedPlaylist: null, draft: null,
   selectedLayout: null, layoutDraft: null,
 };
@@ -483,12 +483,14 @@ function renderPlaylistSelects() {
   const current = sel.value;
   sel.replaceChildren(...contentOptions(current).filter(Boolean));
   renderDevices();
+  renderGroups();
   if (state.layoutDraft && !state.layoutDraft.dirty) renderLayoutEditor();
 }
 
 async function loadDevices() {
   state.devices = await api("GET", "/api/devices");
   renderDevices();
+  renderGroups();
 }
 
 function renderDevices() {
@@ -500,17 +502,26 @@ function renderDevices() {
   rows.replaceChildren(...state.devices.map((d) => h("tr", {},
     h("td", {}, h("strong", {}, d.name), h("div", { class: "small-text" }, `Paired ${new Date(d.pairedAt).toLocaleDateString()}`)),
     h("td", {}, h("span", { class: `dot ${d.online ? "on" : ""}` }), d.online ? "Online" : `Offline · ${fmtAgo(d.lastSeen)}`),
-    h("td", {},
-      h("select", { onchange: async (e) => {
-        await api("PATCH", `/api/devices/${d.id}`, contentBody(e.target.value));
+    h("td", { class: "showing" },
+      state.groups.length ? h("select", { title: "Group", onchange: async (e) => {
+        await api("PATCH", `/api/devices/${d.id}`, { groupId: e.target.value || null });
         toast("Saved. The screen switches within 30 seconds.");
         loadDevices();
-      } }, contentOptions(contentValue(d))),
-      scheduleSummary(d)),
+      } }, h("option", { value: "" }, "No group"),
+        state.groups.map((g) => h("option", { value: g.id, selected: g.id === d.groupId }, `Group: ${g.name}`))) : null,
+      d.groupId
+        ? h("div", { class: "small-text" }, "Shows the group's content", d.nowShowing ? ` · now: ${d.nowShowing}` : "")
+        : [h("select", { title: "Shows", onchange: async (e) => {
+            await api("PATCH", `/api/devices/${d.id}`, contentBody(e.target.value));
+            toast("Saved. The screen switches within 30 seconds.");
+            loadDevices();
+          } }, contentOptions(contentValue(d))),
+          scheduleSummary(d)]),
     h("td", { class: "small-text" }, [d.info?.manufacturer, d.info?.model].filter(Boolean).join(" ") || "—",
       d.info?.appVersion ? h("div", {}, `App ${d.info.appVersion}`) : ""),
     h("td", {}, h("div", { class: "inline" },
-      h("button", { class: "ghost small", onclick: () => openScheduleEditor(`Schedule for ${d.name}`, d, async (schedule) => {
+      h("button", { class: "ghost small", disabled: !!d.groupId, title: d.groupId ? "This screen follows its group's schedule" : "",
+        onclick: () => openScheduleEditor(`Schedule for ${d.name}`, d, async (schedule) => {
         await api("PATCH", `/api/devices/${d.id}`, { schedule });
         await loadDevices();
       }) }, "Schedule"),
@@ -526,6 +537,58 @@ function renderDevices() {
     )),
   )));
 }
+
+// ---------- groups ----------
+
+async function loadGroups() {
+  state.groups = await api("GET", "/api/groups");
+  renderGroups();
+  renderDevices();
+}
+
+function renderGroups() {
+  const box = $("#group-rows");
+  if (!state.groups.length) { box.replaceChildren(h("p", { class: "muted small-text" }, "No groups yet.")); return; }
+  box.replaceChildren(...state.groups.map((g) => {
+    const members = state.devices.filter((d) => d.groupId === g.id);
+    return h("div", { class: "group-row" },
+      h("div", {}, h("strong", {}, g.name),
+        h("div", { class: "small-text" }, `${members.length} screen${members.length === 1 ? "" : "s"}`,
+          members.length ? `: ${members.map((m) => m.name).join(", ")}` : "")),
+      h("div", {},
+        h("select", { onchange: async (e) => {
+          await api("PATCH", `/api/groups/${g.id}`, contentBody(e.target.value));
+          toast("Saved. Screens in the group switch within 30 seconds.");
+          loadGroups();
+        } }, contentOptions(contentValue(g))),
+        scheduleSummary(g)),
+      h("div", { class: "inline wrap" },
+        h("button", { class: "ghost small", onclick: () => openScheduleEditor(`Schedule for ${g.name}`, g, async (schedule) => {
+          await api("PATCH", `/api/groups/${g.id}`, { schedule });
+          await Promise.all([loadGroups(), loadDevices()]);
+        }) }, "Schedule"),
+        h("button", { class: "ghost small", onclick: async () => {
+          const name = prompt("Group name", g.name);
+          if (name) { await api("PATCH", `/api/groups/${g.id}`, { name }); loadGroups(); }
+        } }, "Rename"),
+        h("button", { class: "danger small", onclick: async () => {
+          if (!confirm(`Delete group "${g.name}"? Its screens go back to their own content.`)) return;
+          await api("DELETE", `/api/groups/${g.id}`);
+          await Promise.all([loadGroups(), loadDevices()]);
+        } }, "Delete"),
+      ),
+    );
+  }));
+}
+
+$("#new-group").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("POST", "/api/groups", { name: e.target.name.value });
+    e.target.reset();
+    loadGroups();
+  } catch (err) { toast(err.message); }
+});
 
 function scheduleSummary(x) {
   if (!x.schedule?.length) return null;
@@ -603,7 +666,7 @@ async function start() {
   $("#login").hidden = true;
   $("#main").hidden = false;
   try {
-    await Promise.all([loadMedia(), loadPlaylists(), loadLayouts(), loadDevices()]);
+    await Promise.all([loadMedia(), loadPlaylists(), loadLayouts(), loadGroups(), loadDevices()]);
   } catch { /* 401 already handled */ }
 }
 

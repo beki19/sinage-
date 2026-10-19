@@ -228,3 +228,30 @@ test("scheduling: time slots validated, sent to the screen, and matched across m
   assert.equal(dev.schedule.length, 0);
   assert.equal(dev.nowShowing, "Lunch");
 });
+
+test("groups: screens in a group show the group's content; deleting the group hands it back", async () => {
+  const own = (await api("POST", "/api/playlists", { name: "Own", items: [{ kind: "text", text: "own" }] }, admin)).json;
+  const shared = (await api("POST", "/api/playlists", { name: "Shared", items: [{ kind: "text", text: "shared" }] }, admin)).json;
+  const group = await api("POST", "/api/groups", { name: "All lobby TVs", playlistId: shared.id }, admin);
+  assert.equal(group.status, 201);
+  assert.equal((await api("POST", "/api/devices/pair", { code: "X", name: "x", groupId: "nope" }, admin)).status, 404);
+
+  const one = await pairScreen("Lobby 1", { playlistId: own.id, groupId: group.json.id });
+  const two = await pairScreen("Lobby 2", { playlistId: own.id });
+  await api("PATCH", `/api/devices/${two.id}`, { groupId: group.json.id }, admin);
+  for (const s of [one, two]) {
+    const man = (await api("GET", "/api/player/manifest", undefined, s.auth)).json;
+    assert.equal(man.defaultProgram, `playlist:${shared.id}`);
+  }
+
+  // One change to the group reaches every screen in it.
+  const sched = [{ days: [0, 1, 2, 3, 4, 5, 6], start: "00:00", end: "00:00", playlistId: own.id }];
+  await api("PATCH", `/api/groups/${group.json.id}`, { schedule: sched }, admin);
+  const man = (await api("GET", "/api/player/manifest", undefined, two.auth)).json;
+  assert.equal(man.schedule[0].program, `playlist:${own.id}`);
+
+  assert.equal((await api("DELETE", `/api/groups/${group.json.id}`, undefined, admin)).status, 204);
+  const after = (await api("GET", "/api/player/manifest", undefined, one.auth)).json;
+  assert.equal(after.defaultProgram, `playlist:${own.id}`);
+  assert.equal(after.schedule.length, 0);
+});

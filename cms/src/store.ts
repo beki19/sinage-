@@ -89,9 +89,21 @@ export interface Device {
   layoutId: string | null;
   /** Time slots that override the default. The first matching one wins. */
   schedule: ScheduleRule[];
+  /** When set, the screen shows its group's content and schedule instead of its own. */
+  groupId: string | null;
   pairedAt: string;
   lastSeen: string | null;
   info: Record<string, string>;
+}
+
+/** Screens that all show the same thing, e.g. "All lobby TVs". */
+export interface Group {
+  id: string;
+  name: string;
+  playlistId: string | null;
+  layoutId: string | null;
+  schedule: ScheduleRule[];
+  createdAt: string;
 }
 
 export interface PendingPairing {
@@ -108,11 +120,12 @@ export interface Data {
   playlists: Playlist[];
   layouts: Layout[];
   devices: Device[];
+  groups: Group[];
   pairings: PendingPairing[];
   sessions: { token: string; createdAt: string }[];
 }
 
-const empty = (): Data => ({ media: [], playlists: [], layouts: [], devices: [], pairings: [], sessions: [] });
+const empty = (): Data => ({ media: [], playlists: [], layouts: [], devices: [], groups: [], pairings: [], sessions: [] });
 
 /** Small JSON-file database. Fine for hundreds of screens; swap for SQL beyond that. */
 export class Store {
@@ -130,6 +143,7 @@ export class Store {
     for (const d of this.data.devices) {
       d.layoutId ??= null;
       d.schedule ??= [];
+      d.groupId ??= null;
     }
   }
 

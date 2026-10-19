@@ -83,6 +83,15 @@
           </div>
           <p class="error" id="pair-error"></p>
         </form>
+        <div class="card groups">
+          <h2>Groups</h2>
+          <p class="muted small-text">Put screens in a group to give them all the same content and schedule in one go.</p>
+          <div id="group-rows" class="group-rows"></div>
+          <form id="new-group" class="inline">
+            <input name="name" placeholder="New group, e.g. All lobby TVs" required>
+            <button type="submit">Add group</button>
+          </form>
+        </div>
         <table class="card devices">
           <thead><tr><th>Screen</th><th>Status</th><th>Showing</th><th>Device</th><th></th></tr></thead>
           <tbody id="device-rows"></tbody>

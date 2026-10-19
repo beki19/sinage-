@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import {
-  Store, type Device, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
+  Store, type Device, type Group, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
 } from "./store.js";
 
 export interface AppOptions {
@@ -251,6 +251,12 @@ export function createApp(opts: AppOptions) {
     });
   };
 
+  const applyGroup = (device: Device, body: Record<string, unknown> | undefined) => {
+    if (body?.groupId !== undefined) {
+      device.groupId = body.groupId ? findOr404(db.groups, String(body.groupId), "Group").id : null;
+    }
+  };
+
   /** Reads playlistId / layoutId (and schedule, where the target has one) from a request body. */
   function applyContent(target: { playlistId: string | null; layoutId: string | null; schedule?: ScheduleRule[] }, body: Record<string, unknown> | undefined) {
     if (body?.playlistId !== undefined) {
@@ -335,8 +341,12 @@ export function createApp(opts: AppOptions) {
 
   type Assignment = { playlistId: string | null; layoutId: string | null; schedule: ScheduleRule[] };
 
-  /** Where a screen takes its content from. */
-  const assignmentOf = (device: Device): Assignment => device;
+  /** Where a screen takes its content from: its group if it has one, otherwise itself. */
+  const assignmentOf = (device: Device): Assignment =>
+    (device.groupId ? db.groups.find((g) => g.id === device.groupId) : undefined) ?? device;
+
+  /** Everything that points at playlists and layouts: screens and groups. */
+  const assignments = (): Assignment[] => [...db.devices, ...db.groups];
 
   /** Time slots whose playlist or layout still exists, pointing at program ids. */
   const scheduleRefs = (a: Assignment) => a.schedule.flatMap((r) => {
@@ -499,9 +509,9 @@ export function createApp(opts: AppOptions) {
   app.delete("/api/playlists/:id", requireAdmin, route((req, res) => {
     const p = findOr404(db.playlists, String(req.params.id), "Playlist");
     db.playlists = db.playlists.filter((x) => x !== p);
-    for (const d of db.devices) {
-      if (d.playlistId === p.id) d.playlistId = null;
-      d.schedule = d.schedule.filter((r) => r.playlistId !== p.id);
+    for (const a of assignments()) {
+      if (a.playlistId === p.id) a.playlistId = null;
+      a.schedule = a.schedule.filter((r) => r.playlistId !== p.id);
     }
     for (const l of db.layouts) for (const z of l.zones) if (z.playlistId === p.id) z.playlistId = null;
     store.save();
@@ -538,10 +548,39 @@ export function createApp(opts: AppOptions) {
   app.delete("/api/layouts/:id", requireAdmin, route((req, res) => {
     const l = findOr404(db.layouts, String(req.params.id), "Layout");
     db.layouts = db.layouts.filter((x) => x !== l);
-    for (const d of db.devices) {
-      if (d.layoutId === l.id) d.layoutId = null;
-      d.schedule = d.schedule.filter((r) => r.layoutId !== l.id);
+    for (const a of assignments()) {
+      if (a.layoutId === l.id) a.layoutId = null;
+      a.schedule = a.schedule.filter((r) => r.layoutId !== l.id);
     }
+    store.save();
+    res.status(204).end();
+  }));
+
+  // ---------- screen groups ----------
+
+  app.get("/api/groups", requireAdmin, route((_req, res) => res.json(db.groups)));
+
+  app.post("/api/groups", requireAdmin, route((req, res) => {
+    const g: Group = { id: id(), name: str(req.body?.name, "name"), playlistId: null, layoutId: null, schedule: [], createdAt: now() };
+    applyContent(g, req.body);
+    db.groups.push(g);
+    store.save();
+    res.status(201).json(g);
+  }));
+
+  app.patch("/api/groups/:id", requireAdmin, route((req, res) => {
+    const g = findOr404(db.groups, String(req.params.id), "Group");
+    if (req.body?.name !== undefined) g.name = str(req.body.name, "name");
+    applyContent(g, req.body);
+    store.save();
+    res.json(g);
+  }));
+
+  app.delete("/api/groups/:id", requireAdmin, route((req, res) => {
+    const g = findOr404(db.groups, String(req.params.id), "Group");
+    db.groups = db.groups.filter((x) => x !== g);
+    // Screens leave the group and go back to their own content.
+    for (const d of db.devices) if (d.groupId === g.id) d.groupId = null;
     store.save();
     res.status(204).end();
   }));
@@ -564,11 +603,13 @@ export function createApp(opts: AppOptions) {
       playlistId: null,
       layoutId: null,
       schedule: [],
+      groupId: null,
       pairedAt: now(),
       lastSeen: null,
       info: pairing.info,
     };
     applyContent(device, req.body);
+    applyGroup(device, req.body);
     db.devices.push(device);
     pairing.deviceId = device.id;
     store.save();
@@ -579,6 +620,7 @@ export function createApp(opts: AppOptions) {
     const d = findOr404(db.devices, String(req.params.id), "Device");
     if (req.body?.name !== undefined) d.name = str(req.body.name, "name");
     applyContent(d, req.body);
+    applyGroup(d, req.body);
     store.save();
     res.json(publicDevice(d));
   }));
