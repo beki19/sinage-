@@ -203,6 +203,19 @@ body:not([data-role=admin]) .admin-only { display: none !important; }
 .stack label { display: grid; gap: 4px; }
 #account { white-space: nowrap; }
 
+.vbadge { font-size: .75rem; line-height: 1.35; padding: 6px 8px; border-radius: 6px; display: grid; gap: 6px; justify-items: start; }
+.vbadge.good { background: color-mix(in srgb, #0ca30c 14%, transparent); }
+.vbadge.info { background: color-mix(in srgb, #2563eb 14%, transparent); }
+.vbadge.bad { background: color-mix(in srgb, #d03b3b 14%, transparent); }
+.live { margin-top: 3px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live.bad, .live-details .bad, .zone-live li.bad { color: var(--danger); }
+.live.bad { white-space: normal; }
+.live-head { font-size: .9rem; margin: 12px 0 6px; }
+.live-details { display: grid; gap: 6px; }
+.zone-live { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: .88rem; }
+.zone-live li { display: flex; gap: 8px; align-items: flex-start; }
+.zl-icon { width: 16px; text-align: center; flex: none; }
+
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px; z-index: 10; }
 @media (max-width: 600px) {
   header { flex-wrap: wrap; padding: 10px 16px; }

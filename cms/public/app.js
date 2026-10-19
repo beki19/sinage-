@@ -64,6 +64,8 @@ const preview = (m, { controls = false } = {}) =>
 // ---------- login ----------
 
 function showLogin() {
+  liveSource?.close();
+  liveSource = null;
   state.token = null;
   localStorage.removeItem("token");
   $("#main").hidden = true;
@@ -208,7 +210,7 @@ function renderDashboard(d) {
           h("span", { class: "board-name" },
             h("span", { class: `status-pill small ${x.online ? "good" : "critical"}` }, h("span", { class: "status-icon" }, x.online ? "✓" : "!"), x.online ? "Online" : "Offline"),
             h("strong", {}, x.name), x.group ? h("span", { class: "muted small-text" }, `Group: ${x.group}`) : null),
-          h("span", { class: x.nowShowing ? "" : "muted" }, x.nowShowing ?? "Nothing assigned"),
+          h("span", { class: x.nowShowing ? "" : "muted" }, x.nowShowing ?? "Nothing assigned", liveSummary(x.live)),
           h("span", { class: "strip" }, x.hourly.map((v, i) => h("span", {
             class: `cell ${uptimeClass(v)}`,
             "data-tip": `${x.name}, ${fmtTime(new Date(hourStart(i)).toISOString())}: ${v == null ? "not paired yet" : `${pct(v)} of the hour online`}`,
@@ -323,7 +325,8 @@ function renderMedia() {
       h("div", { class: "thumb" }, preview(m, { controls: m.type === "video" }), h("span", { class: "badge" }, m.type)),
       h("div", { class: "meta" },
         h("div", { class: "name", title: m.name }, m.name),
-        h("div", { class: "muted" }, fmtSize(m.size)),
+        h("div", { class: "muted" }, fmtSize(m.size), m.video ? ` · ${m.video.width}×${m.video.height}` : ""),
+        m.type === "video" ? videoBadge(m) : null,
         h("div", { class: "actions" },
           h("button", { class: "ghost small", onclick: () => renameMedia(m) }, "Rename"),
           h("button", { class: "danger small", onclick: () => deleteMedia(m) }, "Delete"),
@@ -331,6 +334,23 @@ function renderMedia() {
       ),
     ));
   }
+}
+
+/** Whether a video is ready for TVs: most TVs only manage H.264 at 1080p, so bigger videos get a converted copy. */
+function videoBadge(m) {
+  const retry = (label) => h("button", { class: "ghost small", onclick: async () => {
+    try { await api("POST", `/api/media/${m.id}/convert`); await loadMedia(); } catch (err) { toast(err.message); }
+  } }, label);
+  if (m.convert === "running") return h("div", { class: "vbadge info" }, "⏳ Making a 1080p copy for screens…");
+  if (m.screenCopy) return h("div", { class: "vbadge good" }, `✓ Screens get a 1080p copy (${fmtSize(m.screenCopy.size)})`);
+  if (m.convert === "failed") return h("div", { class: "vbadge bad" }, `⚠ Converting failed: ${m.convertError ?? ""}`, retry("Try again"));
+  if (m.convert === "needs-ffmpeg") {
+    return h("div", { class: "vbadge bad" },
+      `⚠ ${m.video?.label ?? "This video"}: many TVs can't play this and stay black. Install FFmpeg on the CMS computer to convert it automatically, or upload a 1920×1080 H.264 version.`,
+      retry("Check again"));
+  }
+  if (m.video?.tvSafe) return h("div", { class: "vbadge good" }, `✓ Ready for screens · ${m.video.label}`);
+  return null;
 }
 
 async function renameMedia(m) {
@@ -1073,6 +1093,59 @@ async function loadDevices() {
   state.devices = await api("GET", "/api/devices");
   renderDevices();
   renderGroups();
+  if ($("#dialog").open) state.dialogRefresh?.();
+}
+
+// ---------- live status ----------
+
+const LIVE_ICONS = { playing: "▶", loading: "…", error: "⚠", idle: "■", downloading: "⇩" };
+
+/** One line on what a screen is doing: "▶ promo.mp4" or "⚠ This screen can't play 4K video". */
+function liveSummary(live) {
+  if (!live) return null;
+  if (live.download && live.state === "downloading") {
+    return h("div", { class: "live small-text" }, `⇩ Downloading ${live.download.done + 1} of ${live.download.total} (${live.download.mb} MB)`);
+  }
+  const err = live.zones.find((z) => z.state === "error");
+  if (err) return h("div", { class: "live small-text bad" }, `⚠ ${err.label ?? err.kind ?? "Item"}: ${err.error ?? "failed"}`);
+  const playing = live.zones.filter((z) => z.state === "playing" && z.label).map((z) => z.label);
+  if (playing.length) return h("div", { class: "live small-text" }, `▶ ${playing.slice(0, 2).join(" · ")}${playing.length > 2 ? ` +${playing.length - 2}` : ""}`);
+  return live.state ? h("div", { class: "live small-text muted" }, live.state) : null;
+}
+
+/** The full picture for the Control dialog: every zone, downloads, screen size and free space. */
+function liveDetails(live) {
+  if (!live) return h("p", { class: "muted small-text" }, "No live status yet. Screens send it from player version 1.4.0.");
+  return h("div", { class: "live-details" },
+    h("div", { class: "small-text muted" },
+      [live.programName ? `Showing ${live.programName}` : "Nothing assigned", live.screen ? `screen ${live.screen}` : null,
+        live.freeMb != null ? `${live.freeMb >= 1000 ? (live.freeMb / 1000).toFixed(1) + " GB" : live.freeMb + " MB"} free` : null,
+        live.videoMode === "texture" ? "video: compatibility mode" : null, `updated ${fmtAgo(live.at)}`].filter(Boolean).join(" · ")),
+    live.download ? h("div", { class: "small-text" }, `⇩ Downloading file ${live.download.done + 1} of ${live.download.total} (${live.download.mb} MB so far)`) : null,
+    live.message ? h("div", { class: "small-text bad" }, live.message) : null,
+    h("ul", { class: "zone-live" }, live.zones.map((z) => h("li", { class: z.state === "error" ? "bad" : "" },
+      h("span", { class: "zl-icon" }, LIVE_ICONS[z.state] ?? "•"),
+      h("span", {}, h("strong", {}, z.zoneName ?? "Zone"), ` ${z.label ?? z.kind ?? "nothing"}`,
+        z.state !== "playing" ? h("span", { class: "muted" }, ` · ${z.state}`) : null,
+        z.error ? h("div", { class: "small-text" }, z.error) : null)))),
+  );
+}
+
+// Pushes from the CMS ("something changed") reload whatever is on screen, so screens' status updates live.
+let liveSource = null;
+let liveTimer = null;
+function connectLive() {
+  liveSource?.close();
+  if (!state.token || typeof EventSource === "undefined") return;
+  liveSource = new EventSource(`/api/live?token=${encodeURIComponent(state.token)}`);
+  liveSource.onmessage = () => {
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(() => {
+      if (!$("#tab-devices").hidden || $("#dialog").open) loadDevices().catch(() => {});
+      if (!$("#tab-dashboard").hidden) loadDashboard().catch(() => {});
+      if (!$("#tab-media").hidden) loadMedia().catch(() => {});
+    }, 250);
+  };
 }
 
 function renderDevices() {
@@ -1083,7 +1156,8 @@ function renderDevices() {
   }
   rows.replaceChildren(...state.devices.map((d) => h("tr", {},
     h("td", {}, h("strong", {}, d.name), h("div", { class: "small-text" }, `Paired ${new Date(d.pairedAt).toLocaleDateString()}`)),
-    h("td", {}, h("span", { class: `dot ${d.online ? "on" : ""}` }), d.online ? "Online" : `Offline · ${fmtAgo(d.lastSeen)}`),
+    h("td", {}, h("span", { class: `dot ${d.online ? "on" : ""}` }), d.online ? "Online" : `Offline · ${fmtAgo(d.lastSeen)}`,
+      d.online ? liveSummary(d.live) : null),
     h("td", { class: "showing" },
       state.groups.length ? h("select", { title: "Group", onchange: async (e) => {
         await api("PATCH", `/api/devices/${d.id}`, { groupId: e.target.value || null });
@@ -1220,6 +1294,8 @@ function openControl(deviceId) {
         x.commands.length ? ` Waiting for the screen to run: ${x.commands.map((c) => COMMAND_LABELS[c.type]).join(", ")}.` : ""),
       r ? h("p", { class: `small-text ${r.ok ? "muted" : "error"}` },
         `Last ${COMMAND_LABELS[r.type]} (${fmtAgo(r.at)}): ${r.message || (r.ok ? "done" : "failed")}`) : null,
+      h("h3", { class: "live-head" }, "Live status"),
+      x.online ? liveDetails(x.live) : h("p", { class: "muted small-text" }, "The screen is offline."),
       h("div", { class: "inline wrap dialog-actions" },
         h("button", { onclick: () => send("screenshot") }, "Take screenshot"),
         h("button", { class: "ghost", title: "Re-check content and play from the top", onclick: () => send("refresh") }, "Refresh content"),
@@ -1229,6 +1305,8 @@ function openControl(deviceId) {
       ),
     );
   };
+  state.dialogRefresh = render;
+  $("#dialog").addEventListener("close", () => { if (state.dialogRefresh === render) state.dialogRefresh = null; }, { once: true });
   render();
   if (cur()?.commands.length) watch();
 }
@@ -1395,6 +1473,7 @@ async function start() {
     document.body.dataset.role = state.me.role;
     $("#account").textContent = `${state.me.username} · ${ROLE_NAMES[state.me.role]}`;
     await Promise.all([loadMedia(), loadPlaylists(), loadLayouts(), loadGroups(), loadDevices(), loadUsers(), loadDashboard()]);
+    connectLive();
   } catch { /* 401 already handled */ }
 }
 

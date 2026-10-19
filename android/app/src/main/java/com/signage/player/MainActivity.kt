@@ -12,7 +12,10 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PixelCopy
+import android.view.SurfaceView
 import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
@@ -45,7 +48,7 @@ import kotlin.coroutines.resumeWithException
  * The whole app is one fullscreen activity that moves through three states:
  * setup (enter server address) -> pairing (show code) -> playback (loop playlist).
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), ZoneHost {
     private lateinit var prefs: Prefs
     private lateinit var cache: ContentCache
     private lateinit var screen: ScreenPlayer
@@ -59,6 +62,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
 
     private var runJob: Job? = null
+    private val status = LiveStatus()
+    private var currentMedia: Map<String, MediaFile> = emptyMap()
     private var setupResult: CompletableDeferred<String>? = null
     private val tapTimes = ArrayDeque<Long>()
 
@@ -179,6 +184,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
         setupError.text = ""
+        // Put the on-screen keyboard away, or it stays over the content on TVs.
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(serverInput.windowToken, 0)
+        serverInput.clearFocus()
         setupResult?.complete(url)
     }
 
@@ -226,8 +234,27 @@ class MainActivity : AppCompatActivity() {
             val key = m.version + "/" + program?.id
             if (key == showing) return
             val files = m.media.associateBy { it.mediaId }
-            screen.play(this, program, api.baseUrl, token) { id -> files[id]?.takeIf { cache.isCached(it) }?.let { cache.fileFor(it) } }
+            currentMedia = files
+            status.program = program?.id
+            status.zones.clear()
+            screen.play(this, program, api.baseUrl, token, this@MainActivity) { id -> files[id]?.takeIf { cache.isCached(it) }?.let { cache.fileFor(it) } }
             showing = key
+            status.state = if (program == null) "nothing assigned" else "playing"
+            status.changed()
+        }
+
+        // Tells the CMS what's on screen whenever it changes, at most about once a second.
+        launch {
+            for (unused in status.dirty) {
+                try {
+                    api.sendStatus(token, status.toJson(this@MainActivity, prefs.videoMode))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Offline or an older CMS: the next change tries again.
+                }
+                delay(1000)
+            }
         }
 
         // Start straight away from what's on disk, so a reboot without network still shows content.
@@ -241,8 +268,11 @@ class MainActivity : AppCompatActivity() {
 
         // Remote commands already carried out by this run, so a slow acknowledgement doesn't run one twice.
         val handled = HashSet<String>()
+        // Older CMS versions have no wait call; then the player checks in on a timer instead.
+        var canWait = true
 
         while (true) {
+            var fetched = false
             var pollSeconds = 30
             var refresh = false
             try {
@@ -261,17 +291,22 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (m.version != manifest?.version) {
                     cache.sync(api, token, m.media) { done, total, bytes ->
-                        // Only show progress on a blank screen; never draw over live content.
-                        if (showing == null) runOnUiThread {
-                            showStatus("Downloading ${done + 1} of $total (${bytes / 1_000_000} MB)")
+                        runOnUiThread {
+                            // Only show progress on a blank screen; never draw over live content.
+                            if (showing == null) showStatus("Downloading ${done + 1} of $total (${bytes / 1_000_000} MB)")
+                            status.download = Triple(done, total, bytes)
+                            if (showing == null) status.state = "downloading"
+                            status.changed()
                         }
                     }
+                    status.download = null
                     prefs.manifestJson = json
                     manifest = m
                     showActive() // switch over before deleting files the old content used
                     cache.prune(m.media)
                 }
                 hideStatus()
+                fetched = true
             } catch (e: CancellationException) {
                 throw e
             } catch (e: UnpairedException) {
@@ -281,10 +316,28 @@ class MainActivity : AppCompatActivity() {
                 pollSeconds = 15
             } catch (e: Exception) {
                 if (showing == null) showStatus("Problem loading content: ${e.message}")
+                status.message = "Problem loading content: ${e.message}"
+                status.changed()
                 pollSeconds = 15
             }
             showActive()
-            delay(pollSeconds * 1000L)
+            val key = manifest?.changeKey.orEmpty()
+            if (fetched && canWait && key.isNotEmpty()) {
+                // Hold a request open; the CMS answers the moment content or a command changes (or after ~25 s).
+                try {
+                    api.waitForChange(token, key)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: UnpairedException) {
+                    throw e
+                } catch (e: WaitNotSupportedException) {
+                    canWait = false
+                } catch (e: Exception) {
+                    delay(10_000)
+                }
+            } else {
+                delay(pollSeconds * 1000L)
+            }
         }
     }
 
@@ -353,6 +406,19 @@ class MainActivity : AppCompatActivity() {
                     else cont.resumeWithException(IOException("PixelCopy error $result"))
                 }, Handler(Looper.getMainLooper()))
             }
+            // Video drawn on a SurfaceView isn't part of the window's picture: copy each one and paint it in.
+            val canvas = Canvas(bitmap)
+            for (sv in surfaceViews(root)) {
+                if (!sv.isShown || sv.width <= 0 || sv.height <= 0 || !sv.holder.surface.isValid) continue
+                val part = Bitmap.createBitmap(sv.width, sv.height, Bitmap.Config.ARGB_8888)
+                val ok = suspendCancellableCoroutine { cont ->
+                    PixelCopy.request(sv, part, { result -> cont.resume(result == PixelCopy.SUCCESS) }, Handler(Looper.getMainLooper()))
+                }
+                if (ok) {
+                    val at = IntArray(2).also { sv.getLocationInWindow(it) }
+                    canvas.drawBitmap(part, at[0].toFloat(), at[1].toFloat(), null)
+                }
+            }
         } else {
             // Older Android can only draw ordinary views; video areas come out black.
             root.draw(Canvas(bitmap))
@@ -367,6 +433,30 @@ class MainActivity : AppCompatActivity() {
             ByteArrayOutputStream().also { small.compress(Bitmap.CompressFormat.JPEG, 75, it) }.toByteArray()
         }
     }
+
+    private fun surfaceViews(v: View): List<SurfaceView> = when (v) {
+        is SurfaceView -> listOf(v)
+        is ViewGroup -> (0 until v.childCount).flatMap { surfaceViews(v.getChildAt(it)) }
+        else -> emptyList()
+    }
+
+    // ---------- ZoneHost: what the zones on screen need from here ----------
+
+    override var videoMode: String
+        get() = prefs.videoMode
+        set(v) {
+            prefs.videoMode = v
+            status.changed()
+        }
+
+    override fun report(zoneId: String, item: Item?, state: String, error: String?) {
+        runOnUiThread {
+            status.zones[zoneId] = LiveStatus.Zone(item?.id, item?.kind, state, error)
+            status.changed()
+        }
+    }
+
+    override fun media(mediaId: String): MediaFile? = currentMedia[mediaId]
 
     private fun deviceInfo() = mapOf(
         "manufacturer" to Build.MANUFACTURER,

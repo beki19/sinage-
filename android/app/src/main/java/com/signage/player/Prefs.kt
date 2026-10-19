@@ -23,6 +23,11 @@ class Prefs(context: Context) {
         get() = sp.getString("manifest", null)
         set(v) = sp.edit().putString("manifest", v).apply()
 
+    /** How video is drawn on this device: "surface", or "texture" once SurfaceView showed no picture here. */
+    var videoMode: String
+        get() = sp.getString("videoMode", null) ?: VideoView.MODE_SURFACE
+        set(v) = sp.edit().putString("videoMode", v).apply()
+
     fun unpair() {
         sp.edit().remove("deviceToken").remove("deviceName").remove("manifest").apply()
     }

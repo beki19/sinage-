@@ -28,8 +28,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -44,6 +43,21 @@ import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+/** What a zone needs from the screen around it. */
+interface ZoneHost {
+    /** How video is drawn: VideoView.MODE_SURFACE, or MODE_TEXTURE after the surface stayed black on this device. */
+    var videoMode: String
+
+    /** What the zone is doing now, for the CMS's live status: loading, playing, idle or error. */
+    fun report(zoneId: String, item: Item?, state: String, error: String? = null)
+
+    /** Size and codec of a video, when the CMS knows them. */
+    fun media(mediaId: String): MediaFile?
+}
+
+/** Video that never showed a picture, so the next attempt can try another way of drawing it. */
+class NoPictureException : Exception("The video never showed a picture")
+
 /**
  * Loops one zone's items inside [container]: images in an ImageView, videos and live streams in ExoPlayer,
  * web pages and YouTube in a WebView, text and tickers in a TextView. Views are created when first needed.
@@ -56,6 +70,8 @@ class PlaylistPlayer(
     /** CMS address: the origin for world clock and news pages, so they can fetch headlines from it. */
     private val serverUrl: String,
     private val deviceToken: String,
+    private val zoneId: String,
+    private val host: ZoneHost,
 ) {
     private val imageView = ImageView(context).apply {
         scaleType = ImageView.ScaleType.FIT_CENTER
@@ -67,7 +83,7 @@ class PlaylistPlayer(
         addView(textView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
     }
     private var exo: ExoPlayer? = null
-    private var playerView: PlayerView? = null
+    private var videoView: VideoView? = null
     private var webView: WebView? = null
     private var pageLoaded: CompletableDeferred<Unit>? = null
     private var ticker: ValueAnimator? = null
@@ -98,6 +114,7 @@ class PlaylistPlayer(
 
     fun release() {
         stop()
+        videoView?.release()
         exo?.release()
         exo = null
         webView?.destroy()
@@ -114,6 +131,7 @@ class PlaylistPlayer(
                 active.isEmpty() -> {
                     shownAlone = null
                     blank()
+                    host.report(zoneId, null, "idle")
                     delay(10_000)
                 }
                 // A single item never needs to change: show it once and just re-check the dates now and then.
@@ -122,11 +140,14 @@ class PlaylistPlayer(
                     if (only != shownAlone) {
                         shownAlone = only
                         try {
+                            host.report(zoneId, only, "loading")
                             showAlone(only, fileFor)
+                            host.report(zoneId, only, "playing")
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
                             Log.w(TAG, "Cannot show ${only.kind} ${only.id}", e)
+                            host.report(zoneId, only, "error", describe(only, e))
                             blank()
                         }
                     }
@@ -137,12 +158,14 @@ class PlaylistPlayer(
                     for (item in active) {
                         if (!item.isActiveAt(System.currentTimeMillis())) continue
                         try {
+                            host.report(zoneId, item, "loading")
                             showFor(item, alone = active.size == 1, fileFor)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
                             // Skip a broken item rather than stopping the whole screen.
                             Log.w(TAG, "Skipping ${item.kind} ${item.id}", e)
+                            host.report(zoneId, item, "error", describe(item, e))
                             delay(if (item.kind == "stream") 5000 else 1000)
                         }
                     }
@@ -157,7 +180,7 @@ class PlaylistPlayer(
             "image" -> showImage(fileFor(item.mediaId!!)!!)
             "video" -> {
                 ensureExo().repeatMode = Player.REPEAT_MODE_ONE
-                playMedia(MediaItem.fromUri(Uri.fromFile(fileFor(item.mediaId!!)!!)), untilEnded = false)
+                playVideo(MediaItem.fromUri(Uri.fromFile(fileFor(item.mediaId!!)!!)), untilEnded = false)
             }
             "text" -> showText(item)
             "web", "youtube", "html" -> showWeb(item)
@@ -169,25 +192,31 @@ class PlaylistPlayer(
         when (item.kind) {
             "image" -> {
                 showImage(fileFor(item.mediaId!!)!!)
+                host.report(zoneId, item, "playing")
                 delay(item.duration * 1000L)
             }
             "video" -> {
                 ensureExo().repeatMode = Player.REPEAT_MODE_OFF
-                playMedia(MediaItem.fromUri(Uri.fromFile(fileFor(item.mediaId!!)!!)), untilEnded = true)
+                playVideo(MediaItem.fromUri(Uri.fromFile(fileFor(item.mediaId!!)!!)), untilEnded = true) {
+                    host.report(zoneId, item, "playing")
+                }
             }
             "stream" -> {
                 ensureExo().repeatMode = Player.REPEAT_MODE_OFF
                 val media = streamItem(item.url)
                 // On its own, a live stream plays nonstop; in a loop it gets its set time.
-                if (alone) playMedia(media, untilEnded = true)
-                else withTimeoutOrNull(item.duration * 1000L) { playMedia(media, untilEnded = true) }
+                val onStart = { host.report(zoneId, item, "playing") }
+                if (alone) playVideo(media, untilEnded = true, onStart)
+                else withTimeoutOrNull(item.duration * 1000L) { playVideo(media, untilEnded = true, onStart) }
             }
             "text" -> {
                 showText(item)
+                host.report(zoneId, item, "playing")
                 delay(item.duration * 1000L)
             }
             "web", "youtube", "html" -> {
                 showWeb(item)
+                host.report(zoneId, item, "playing")
                 delay(item.duration * 1000L)
             }
         }
@@ -217,17 +246,55 @@ class PlaylistPlayer(
 
     // ---------- video and live streams ----------
 
-    private fun ensureExo(): ExoPlayer = exo ?: ExoPlayer.Builder(context).build().also { player ->
+    private fun ensureExo(): ExoPlayer = exo ?: ExoPlayer.Builder(
+        context,
+        // If the device's first-choice decoder can't open a video, try the next one instead of failing.
+        DefaultRenderersFactory(context).setEnableDecoderFallback(true),
+    ).build().also { player ->
         player.volume = if (withSound) 1f else 0f
         exo = player
-        // Stays visible underneath the other views: a hidden SurfaceView has no surface to draw the first frame on.
-        playerView = PlayerView(context).apply {
-            useController = false
-            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-            setShutterBackgroundColor(Color.BLACK)
-            this.player = player
+        attachVideoView(host.videoMode)
+    }
+
+    /** Puts a video view at the bottom of the zone. It stays visible: a hidden SurfaceView has nothing to draw the first frame on. */
+    private fun attachVideoView(mode: String) {
+        val player = exo ?: return
+        videoView?.let {
+            it.release()
+            container.removeView(it)
         }
-        container.addView(playerView, 0, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        videoView = VideoView(context, player, mode).also {
+            container.addView(it, 0, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
+    }
+
+    /**
+     * Plays a video, and if it never shows a picture with the usual SurfaceView, switches this device to
+     * TextureView (which some TVs need) and tries once more. [onStart] runs when the picture appears.
+     */
+    private suspend fun playVideo(media: MediaItem, untilEnded: Boolean, onStart: () -> Unit = {}) {
+        ensureExo()
+        try {
+            playMedia(media, untilEnded, onStart)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (videoView?.mode != VideoView.MODE_SURFACE || (e !is NoPictureException && e !is PlaybackException)) throw e
+            Log.w(TAG, "No picture with SurfaceView, trying TextureView", e)
+            host.videoMode = VideoView.MODE_TEXTURE
+            attachVideoView(VideoView.MODE_TEXTURE)
+            playMedia(media, untilEnded, onStart)
+        }
+    }
+
+    /** Explains a failed item in words for the CMS, e.g. that the TV can't decode 4K. */
+    private fun describe(item: Item, e: Exception): String {
+        if (item.kind == "video") {
+            val m = item.mediaId?.let { host.media(it) }
+            if (m != null) VideoSupport.problem(m.codec, m.width, m.height)?.let { return it }
+            if (e is NoPictureException) return "The video plays but shows no picture on this screen"
+        }
+        return (e as? PlaybackException)?.let { "${it.errorCodeName}: ${it.message ?: ""}".trim() } ?: (e.message ?: e.javaClass.simpleName)
     }
 
     private fun streamItem(url: String): MediaItem {
@@ -240,13 +307,22 @@ class PlaylistPlayer(
      * Starts playback and, once the first frame is rendered, brings the video in front of the previous item
      * so there's no black flash between items. Returns when it ends (or right after it starts when looping).
      */
-    private suspend fun playMedia(media: MediaItem, untilEnded: Boolean) {
+    private suspend fun playMedia(media: MediaItem, untilEnded: Boolean, onStart: () -> Unit = {}) {
         val exo = ensureExo()
-        val view = playerView!!
+        val view = videoView!!
         suspendCancellableCoroutine<Unit> { cont ->
-            val listener = object : Player.Listener {
+            lateinit var listener: Player.Listener
+            // A decoder that silently draws nothing counts as a failure after a while.
+            val watchdog = Runnable {
+                exo.removeListener(listener)
+                exo.stop()
+                if (cont.isActive) cont.resumeWithException(NoPictureException())
+            }
+            listener = object : Player.Listener {
                 override fun onRenderedFirstFrame() {
+                    view.removeCallbacks(watchdog)
                     reveal(view)
+                    onStart()
                     if (!untilEnded) finish(null)
                 }
 
@@ -257,13 +333,20 @@ class PlaylistPlayer(
                 override fun onPlayerError(error: PlaybackException) = finish(error)
 
                 fun finish(error: Throwable?) {
+                    view.removeCallbacks(watchdog)
                     exo.removeListener(this)
                     if (!cont.isActive) return
                     if (error == null) cont.resume(Unit) else cont.resumeWithException(error)
                 }
             }
             exo.addListener(listener)
-            cont.invokeOnCancellation { view.post { exo.removeListener(listener) } }
+            cont.invokeOnCancellation {
+                view.post {
+                    view.removeCallbacks(watchdog)
+                    exo.removeListener(listener)
+                }
+            }
+            view.postDelayed(watchdog, FIRST_FRAME_TIMEOUT_MS)
             exo.setMediaItem(media)
             exo.prepare()
             exo.playWhenReady = true
@@ -375,7 +458,7 @@ class PlaylistPlayer(
             if (view != wv && wv.visibility == View.VISIBLE) wv.loadUrl("about:blank") // stops sound and scripts
             wv.visibility = if (view == wv) View.VISIBLE else View.INVISIBLE
         }
-        if (view != playerView) exo?.stop()
+        if (view != videoView) exo?.stop()
     }
 
     private fun blank() = reveal(null)
@@ -387,5 +470,6 @@ class PlaylistPlayer(
 
     private companion object {
         const val TAG = "PlaylistPlayer"
+        const val FIRST_FRAME_TIMEOUT_MS = 15_000L
     }
 }

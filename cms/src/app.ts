@@ -8,12 +8,15 @@ import {
   COMMAND_TYPES, ROLES, Store, type CommandType, type Device, type Group, type Role, type ScreenEvent, type User, type Layout, type LayoutZone, type Media, type Playlist, type PlaylistItem, type ScheduleRule,
 } from "./store.js";
 import { TEMPLATES } from "./templates.js";
+import { convertForScreens, findFfmpeg, probeVideo } from "./video.js";
 import { clockHtml, feedHtml, parseFeed, xHtml, type Headline } from "./widgets.js";
 
 export interface AppOptions {
   dataDir: string;
   adminPassword: string;
   maxUploadMb?: number;
+  /** How long a screen's wait call is held open before answering "no change". */
+  waitMs?: number;
 }
 
 const PAIRING_TTL_MS = 15 * 60 * 1000;
@@ -186,10 +189,36 @@ export function createApp(opts: AppOptions) {
     return v.trim().slice(0, max);
   };
 
+  /** A few words naming an item, for the live status: "promo.mp4", "@dwnews on X", "World clock"… */
+  const itemLabel = (itemId: string | null): string | null => {
+    const it = itemId ? allItems().find((x) => x.id === itemId) : undefined;
+    if (!it) return null;
+    switch (it.kind) {
+      case "media": return db.media.find((m) => m.id === it.mediaId)?.name ?? "Media";
+      case "text": return `"${(it.text ?? "").split(/\r?\n/)[0].slice(0, 40)}"`;
+      case "web": { const yt = youtubeIds(it.url!); return yt?.channelId ? "Live TV channel" : yt ? "YouTube" : new URL(it.url!).hostname; }
+      case "stream": return "Live stream";
+      case "clock": return `World clock (${(it.clocks ?? []).map((c) => c.label).join(", ")})`;
+      case "feed": return it.title ? `News: ${it.title}` : "News feed";
+      case "x": return `@${it.handle} on X`;
+      default: return null;
+    }
+  };
+
   const publicDevice = (device: Device) => {
     const { token: _t, seen: _s, ...rest } = device;
+    const live = rest.live ? {
+      ...rest.live,
+      programName: rest.live.program ? refName(rest.live.program) : null,
+      zones: rest.live.zones.map((z) => {
+        const layoutZone = rest.live!.program?.startsWith("layout:")
+          ? db.layouts.find((l) => `layout:${l.id}` === rest.live!.program)?.zones.find((x) => x.id === z.zoneId) : undefined;
+        return { ...z, zoneName: layoutZone?.name ?? (z.zoneId === "main" ? "Fullscreen" : null), label: itemLabel(z.itemId) };
+      }),
+    } : null;
     return {
       ...rest,
+      live,
       online: rest.lastSeen ? Date.now() - Date.parse(rest.lastSeen) < 2 * 60 * 1000 : false,
       nowShowing: refName(activeRef(assignmentOf(device))),
     };
@@ -408,7 +437,8 @@ export function createApp(opts: AppOptions) {
       switch (it.kind) {
         case "media": {
           const m = db.media.find((x) => x.id === it.mediaId);
-          return m ? [{ ...common, kind: m.type, mediaId: m.id }] : [];
+          // A video being converted for TVs waits until its screen copy is ready.
+          return m && m.convert !== "running" ? [{ ...common, kind: m.type, mediaId: m.id }] : [];
         }
         case "text":
           return [{ ...common, kind: "text", text: it.text, color: it.color, background: it.background, scroll: !!it.scroll }];
@@ -429,8 +459,60 @@ export function createApp(opts: AppOptions) {
       }
     });
 
-  const mediaFile = (m: Media) =>
-    ({ mediaId: m.id, type: m.type, mime: m.mime, size: m.size, sha256: m.sha256, url: `/api/player/media/${m.id}` });
+  /** What screens download for a media item: its TV-friendly copy if it has one. */
+  const mediaFile = (m: Media) => {
+    const f = m.screenCopy ?? { size: m.size, sha256: m.sha256 };
+    const v = m.screenCopy ? m.screenCopy.video : m.video;
+    return {
+      mediaId: m.id, type: m.type, mime: m.screenCopy ? "video/mp4" : m.mime, size: f.size, sha256: f.sha256, url: `/api/player/media/${m.id}`,
+      // Lets the player say "this TV can't play 4K" instead of showing black.
+      ...(v ? { width: v.width, height: v.height, codec: v.codec } : {}),
+    };
+  };
+
+  // ---------- making videos TV-friendly ----------
+
+  let converting: Promise<void> = Promise.resolve();
+
+  /** Reads a new video's resolution and codec, and queues a 1080p H.264 copy if TVs may not cope with it. */
+  function checkVideo(m: Media) {
+    m.video = probeVideo(path.join(mediaDir, m.filename));
+    if (!m.video || m.video.tvSafe) {
+      m.convert = null;
+      return;
+    }
+    if (!findFfmpeg()) {
+      m.convert = "needs-ffmpeg";
+      return;
+    }
+    m.convert = "running";
+    m.convertError = null;
+    // One conversion at a time, so a batch of uploads doesn't swamp the computer.
+    converting = converting.then(async () => {
+      if (!db.media.includes(m)) return;
+      const out = `${m.id}.screen.mp4`;
+      try {
+        await convertForScreens(findFfmpeg()!, path.join(mediaDir, m.filename), path.join(mediaDir, out));
+        const full = path.join(mediaDir, out);
+        if (!db.media.includes(m)) { fs.rmSync(full, { force: true }); return; }
+        m.screenCopy = { filename: out, size: fs.statSync(full).size, sha256: await sha256File(full), video: probeVideo(full) };
+        m.convert = "done";
+      } catch (err) {
+        m.convert = "failed";
+        m.convertError = (err as Error).message.slice(0, 300);
+        console.warn(`Converting ${m.name} for screens failed: ${m.convertError}`);
+      }
+      store.save();
+      notifyChange();
+    });
+  }
+
+  // Videos uploaded before this check existed, or left waiting for FFmpeg, get looked at on start-up.
+  for (const m of db.media) {
+    if (m.type !== "video" || m.screenCopy) continue;
+    if (m.video === undefined || m.convert === "needs-ffmpeg" || m.convert === "running") checkVideo(m);
+  }
+  store.save();
 
   /** A zone's own source, wrapped as a one-item playlist. */
   const zonePlaylist = (item: PlaylistItem): Playlist => ({ id: "", name: "", items: [item], updatedAt: "" });
@@ -547,9 +629,20 @@ export function createApp(opts: AppOptions) {
       schedule,
       // Not part of `version`: they don't change what's on screen.
       commands: pendingCommands(device).map(({ id: cid, type }) => ({ id: cid, type })),
+      // Pass back to /api/player/wait to be told the moment either changes.
+      changeKey: changeKey(device, version),
       pollSeconds: 15,
     };
   };
+
+  /** Changes whenever a screen should fetch its manifest again: new content or a new command. */
+  function changeKey(device: Device, version: string = manifestVersion(device)): string {
+    return `${version}.${pendingCommands(device).map((c) => c.id).join(",")}`;
+  }
+
+  function manifestVersion(device: Device): string {
+    return manifestFor(device).version;
+  }
 
   const route = (fn: Handler) => (req: Request, res: Response) => fn(req, res);
 
@@ -671,11 +764,24 @@ export function createApp(opts: AppOptions) {
         sha256: await sha256File(f.path),
         createdAt: now(),
       };
+      if (m.type === "video") checkVideo(m);
       db.media.push(m);
       created.push(m);
     }
     store.save();
     res.status(201).json(created);
+  }));
+
+  /** Try the TV-friendly copy again, e.g. after installing FFmpeg or if it failed. */
+  app.post("/api/media/:id/convert", requireLogin, route((req, res) => {
+    const m = findOr404(db.media, String(req.params.id), "Media");
+    if (m.type !== "video") throw new HttpError(400, "Only videos are converted");
+    if (m.convert === "running") return res.json(m);
+    if (m.screenCopy) fs.rmSync(path.join(mediaDir, m.screenCopy.filename), { force: true });
+    m.screenCopy = null;
+    checkVideo(m);
+    store.save();
+    res.json(m);
   }));
 
   app.patch("/api/media/:id", requireLogin, route((req, res) => {
@@ -695,6 +801,7 @@ export function createApp(opts: AppOptions) {
     }
     for (const l of db.layouts) for (const z of l.zones) if (z.item?.kind === "media" && z.item.mediaId === m.id) z.item = null;
     fs.rmSync(path.join(mediaDir, m.filename), { force: true });
+    if (m.screenCopy) fs.rmSync(path.join(mediaDir, m.screenCopy.filename), { force: true });
     store.save();
     res.status(204).end();
   }));
@@ -1092,6 +1199,7 @@ export function createApp(opts: AppOptions) {
         id: d.id, name: d.name, online: pub.online, lastSeen: d.lastSeen, nowShowing: pub.nowShowing, group,
         appVersion: d.info.appVersion ?? null, model: [d.info.manufacturer, d.info.model].filter(Boolean).join(" ") || null,
         screenshotAt: d.screenshotAt, hourly, uptime24h: known.length ? known.reduce((s, x) => s + x, 0) / known.length : null,
+        live: pub.online ? pub.live : null,
       };
     });
     const online = screens.filter((s) => s.online).length;
@@ -1294,8 +1402,94 @@ export function createApp(opts: AppOptions) {
 
   app.get("/api/player/media/:id", requireDevice, route((req, res) => {
     const m = findOr404(db.media, String(req.params.id), "Media");
+    if (m.screenCopy) return res.type("video/mp4").sendFile(path.join(mediaDir, m.screenCopy.filename));
     res.type(m.mime).sendFile(path.join(mediaDir, m.filename));
   }));
+
+  // ---------- live updates ----------
+  // Screens hold a request open on /api/player/wait and the admin page listens on /api/live,
+  // so a change reaches them within a moment instead of at the next poll.
+
+  const waiters = new Set<() => void>();
+  function notifyChange() {
+    for (const w of [...waiters]) w();
+  }
+  const save = store.save.bind(store);
+  store.save = () => {
+    save();
+    notifyChange();
+  };
+
+  const WAIT_MS = opts.waitMs ?? 25_000;
+
+  app.get("/api/player/wait", requireDevice, (req: Request, res: Response) => {
+    const device = res.locals.device as Device;
+    const since = String(req.query.key ?? "");
+    const seen = () => {
+      device.lastSeen = now();
+      recordSeen(device, Date.now());
+    };
+    seen();
+    let done = false;
+    const finish = (changed: boolean) => {
+      if (done) return;
+      done = true;
+      waiters.delete(check);
+      clearTimeout(timer);
+      if (!res.headersSent && !res.writableEnded) res.json({ changed });
+    };
+    const check = () => {
+      if (!db.devices.includes(device)) return finish(true); // removed: let it find out
+      if (changeKey(device) !== since) finish(true);
+    };
+    const timer = setTimeout(() => { seen(); store.saveSoon(); finish(false); }, WAIT_MS);
+    req.on("close", () => finish(false));
+    waiters.add(check);
+    check();
+  });
+
+  /** What the screen is doing right now, sent by the player whenever it changes. */
+  app.post("/api/player/status", requireDevice, route((req, res) => {
+    const device = res.locals.device as Device;
+    const b = req.body ?? {};
+    const text = (v: unknown, max = 200) => (typeof v === "string" ? v.slice(0, max) : null);
+    device.live = {
+      at: now(),
+      state: text(b.state, 20) ?? "unknown",
+      message: text(b.message),
+      program: text(b.program, 100),
+      zones: (Array.isArray(b.zones) ? b.zones : []).slice(0, 12).map((z: Record<string, unknown>) => ({
+        zoneId: text(z?.zoneId, 60) ?? "", itemId: text(z?.itemId, 60), kind: text(z?.kind, 20), state: text(z?.state, 20) ?? "", error: text(z?.error),
+      })),
+      download: b.download && typeof b.download === "object"
+        ? { done: Number(b.download.done) || 0, total: Number(b.download.total) || 0, mb: Number(b.download.mb) || 0 } : null,
+      screen: text(b.screen, 40),
+      freeMb: Number.isFinite(Number(b.freeMb)) ? Number(b.freeMb) : null,
+      videoMode: text(b.videoMode, 20),
+    };
+    device.lastSeen = now();
+    store.saveSoon();
+    notifyChange();
+    res.status(204).end();
+  }));
+
+  /** Server-sent events for the admin page: "change" whenever anything is saved or a screen reports in. */
+  app.get("/api/live", requireLogin, (req: Request, res: Response) => {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
+    res.write("retry: 3000\n\n");
+    let pending: NodeJS.Timeout | null = null;
+    const push = () => {
+      // At most a few pushes a second, however busy things get.
+      pending ??= setTimeout(() => { pending = null; res.write("data: change\n\n"); }, 300);
+    };
+    const ping = setInterval(() => res.write(": ping\n\n"), 20_000);
+    waiters.add(push);
+    req.on("close", () => {
+      waiters.delete(push);
+      clearInterval(ping);
+      if (pending) clearTimeout(pending);
+    });
+  });
 
   // ---------- admin UI + errors ----------
 
@@ -1309,6 +1503,7 @@ export function createApp(opts: AppOptions) {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
     if (err instanceof multer.MulterError) return res.status(400).json({ error: err.message });
+    if ((err as { type?: string })?.type === "entity.parse.failed") return res.status(400).json({ error: "The request body isn't valid JSON" });
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
   });

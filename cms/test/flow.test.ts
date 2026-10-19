@@ -18,7 +18,7 @@ let app!: ReturnType<typeof createApp>;
 
 before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "signage-test-"));
-  app = createApp({ dataDir, adminPassword: "secret" });
+  app = createApp({ dataDir, adminPassword: "secret", waitMs: 1500 });
   flush = () => app.store.save(); // writes any pending save now, so no timer fires after the folder is gone
   server = app.app.listen(0);
   await new Promise((r) => server.once("listening", r));
@@ -488,4 +488,77 @@ test("dashboard charts data: uptime history, status board, content mix, upcoming
   assert.equal(next.to, "Dash B");
   assert.ok(Math.abs(Date.parse(next.at) - at.getTime()) < 61_000);
   assert.ok(Array.isArray(d.attention));
+});
+
+/** A tiny MP4 with just enough boxes for probeVideo: ftyp, then a moov holding an avc1 sample entry. */
+function fakeMp4(width: number, height: number, profile = 100): Buffer {
+  const box = (type: string, payload: Buffer) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(8 + payload.length, 0);
+    head.write(type, 4, "latin1");
+    return Buffer.concat([head, payload]);
+  };
+  const entry = Buffer.alloc(78);
+  entry.writeUInt16BE(width, 24);
+  entry.writeUInt16BE(height, 26);
+  const avcC = box("avcC", Buffer.from([1, profile, 0, 51, 0xff]));
+  const avc1 = box("avc1", Buffer.concat([entry, avcC]));
+  return Buffer.concat([box("ftyp", Buffer.from("isom0000", "latin1")), box("moov", box("stsd", avc1)), box("mdat", Buffer.alloc(16))]);
+}
+
+test("videos: size and codec are read on upload; 4K is flagged for conversion", async () => {
+  const { probeVideo } = await import("../src/video.js");
+  const tmp = path.join(dataDir, "probe.mp4");
+  fs.writeFileSync(tmp, fakeMp4(3840, 2160));
+  assert.deepEqual(probeVideo(tmp), { width: 3840, height: 2160, codec: "avc1", label: "H.264 High 5.1, 3840×2160", tvSafe: false });
+  fs.writeFileSync(tmp, fakeMp4(1920, 1080, 77));
+  assert.equal(probeVideo(tmp)?.tvSafe, true);
+
+  const form = new FormData();
+  form.append("files", new Blob([fakeMp4(3840, 2160)], { type: "video/mp4" }), "big.mp4");
+  form.append("files", new Blob([fakeMp4(1280, 720)], { type: "video/mp4" }), "small.mp4");
+  const up = await (await fetch(base + "/api/media", { method: "POST", headers: { authorization: admin }, body: form })).json();
+  assert.equal(up[0].video.tvSafe, false);
+  assert.ok(["needs-ffmpeg", "running", "failed"].includes(up[0].convert), up[0].convert);
+  assert.equal(up[1].video.tvSafe, true);
+  assert.equal(up[1].convert, null);
+  for (const m of up) await api("DELETE", `/api/media/${m.id}`, undefined, admin);
+});
+
+test("live: a screen's wait call answers as soon as its content changes, and its status shows up", async () => {
+  const pl = (await api("POST", "/api/playlists", { name: "Live A", items: [{ kind: "text", text: "hello" }] }, admin)).json;
+  const screen = await pairScreen("Live TV", { playlistId: pl.id });
+  const man = (await api("GET", "/api/player/manifest", undefined, screen.auth)).json;
+  assert.ok(man.changeKey);
+
+  // Nothing changes: the call is held open, then answers "no change".
+  let t = Date.now();
+  assert.equal((await api("GET", `/api/player/wait?key=${encodeURIComponent(man.changeKey)}`, undefined, screen.auth)).json.changed, false);
+  assert.ok(Date.now() - t >= 1400, "held open until the timeout");
+
+  // A playlist edit wakes it straight away.
+  t = Date.now();
+  const waiting = api("GET", `/api/player/wait?key=${encodeURIComponent(man.changeKey)}`, undefined, screen.auth);
+  await new Promise((r) => setTimeout(r, 100));
+  await api("PUT", `/api/playlists/${pl.id}`, { items: [{ kind: "text", text: "changed" }] }, admin);
+  assert.equal((await waiting).json.changed, true);
+  assert.ok(Date.now() - t < 1000, "answered within a second");
+
+  // So does a command, and a stale key answers at once.
+  assert.equal((await api("GET", "/api/player/wait?key=old", undefined, screen.auth)).json.changed, true);
+
+  // Live status, with item names filled in for the admin page.
+  const itemId = (await api("GET", "/api/playlists", undefined, admin)).json.find((p: { id: string }) => p.id === pl.id).items[0].id;
+  assert.equal((await api("POST", "/api/player/status", {
+    state: "playing", program: `playlist:${pl.id}`, screen: "1920×1080", freeMb: 5000, videoMode: "surface",
+    zones: [{ zoneId: "main", itemId, kind: "text", state: "playing" }],
+  }, screen.auth)).status, 204);
+  const dev = (await api("GET", "/api/devices", undefined, admin)).json.find((d: { id: string }) => d.id === screen.id);
+  assert.equal(dev.live.programName, "Live A");
+  assert.equal(dev.live.zones[0].label, '"changed"');
+  assert.equal(dev.live.zones[0].zoneName, "Fullscreen");
+
+  // Broken JSON is a 400, not a server error.
+  const bad = await fetch(base + "/api/playlists", { method: "POST", headers: { authorization: admin, "content-type": "application/json" }, body: "{nope" });
+  assert.equal(bad.status, 400);
 });

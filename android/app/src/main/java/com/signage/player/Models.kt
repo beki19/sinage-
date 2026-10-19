@@ -22,6 +22,10 @@ data class MediaFile(
     val size: Long,
     val sha256: String,
     val url: String,
+    /** Videos: size and codec (avc1, hvc1…) as read by the CMS, or 0/"" if unknown. */
+    val width: Int = 0,
+    val height: Int = 0,
+    val codec: String = "",
 )
 
 /** One thing shown in a zone. [kind] is image, video, text, web, youtube, stream or html (world clock, news). */
@@ -78,6 +82,8 @@ data class Command(val id: String, val type: String)
 data class Manifest(
     val deviceName: String,
     val version: String,
+    /** Hand back to the CMS's wait call; it answers as soon as this would change. Empty on older CMS versions. */
+    val changeKey: String,
     val media: List<MediaFile>,
     val programs: Map<String, Program>,
     val defaultProgram: String?,
@@ -117,6 +123,7 @@ data class Manifest(
             return Manifest(
                 deviceName = o.optString("deviceName"),
                 version = o.getString("version"),
+                changeKey = o.optString("changeKey"),
                 media = media,
                 programs = programs.associateBy { it.id },
                 defaultProgram = defaultProgram,
@@ -152,6 +159,9 @@ data class Manifest(
             size = m.optLong("size"),
             sha256 = m.getString("sha256"),
             url = m.getString("url"),
+            width = m.optInt("width"),
+            height = m.optInt("height"),
+            codec = m.optString("codec"),
         )
 
         private fun parseProgram(p: JSONObject): Program {
@@ -204,6 +214,9 @@ data class Manifest(
         private fun parseColor(s: String, fallback: Int) = runCatching { Color.parseColor(s) }.getOrDefault(fallback)
     }
 }
+
+/** The CMS is too old to hold a request open until something changes. */
+class WaitNotSupportedException : Exception("The CMS has no wait call")
 
 /** The CMS no longer recognises this device (it was removed), so the player must pair again. */
 class UnpairedException : Exception("Device is not paired")

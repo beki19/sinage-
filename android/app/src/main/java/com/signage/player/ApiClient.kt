@@ -42,6 +42,31 @@ class ApiClient(baseUrl: String) {
         return text
     }
 
+    /**
+     * Waits until the CMS says this screen's content or commands changed (true), or about 25 s pass (false).
+     * Throws [WaitNotSupportedException] on a CMS too old to have this.
+     */
+    suspend fun waitForChange(token: String, key: String): Boolean = withContext(Dispatchers.IO) {
+        val conn = open("GET", "/api/player/wait?key=" + java.net.URLEncoder.encode(key, "UTF-8"), token)
+        conn.readTimeout = 45_000
+        try {
+            when (conn.responseCode) {
+                401 -> throw UnpairedException()
+                404 -> throw WaitNotSupportedException()
+                in 200..299 -> JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).optBoolean("changed")
+                else -> throw IOException("HTTP ${conn.responseCode}")
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** Sends what the screen is doing right now. */
+    suspend fun sendStatus(token: String, json: String) {
+        val (code, _) = requestRaw("POST", "/api/player/status", json, token)
+        if (code == 401) throw UnpairedException()
+    }
+
     /** Tells the CMS how a remote command went. */
     suspend fun commandDone(token: String, commandId: String, ok: Boolean, message: String) {
         val body = JSONObject().put("ok", ok).put("message", message).toString()

@@ -88,6 +88,19 @@ The screen downloads everything, then loops the playlist. When you edit a playli
 
 **On the screen**: press **Back** or **Menu** on the remote, or tap the screen five times quickly, to open the settings menu (change server, unpair, exit).
 
+## Videos and TVs
+
+Most TVs and TV boxes only play **H.264 video up to 1920×1080**. A 4K or H.265 (HEVC) video often shows a black screen. The Media tab shows each video's size and format:
+
+- If [FFmpeg](https://ffmpeg.org) is installed on the CMS computer (`winget install Gyan.FFmpeg` on Windows), the CMS automatically makes a 1080p H.264 copy of any such video, and screens download that copy. Your original is kept for previews.
+- Without FFmpeg, the video is marked with a warning; export a 1920×1080 H.264 version and upload that instead.
+
+If a video still shows no picture, the player switches by itself to a compatibility way of drawing video that some TVs need, and reports any problem in the screen's live status.
+
+## Live status and instant updates
+
+Screens keep a connection open to the CMS, so playlist changes, schedule changes and remote commands reach them within a second or two instead of at the next check-in. Each screen reports what it's doing (what plays in each zone, downloads, errors such as "can't play 4K video", screen size, free space); you'll see it on the Screens tab, in the **Control** dialog and on the Dashboard, updating live. Live status needs player version 1.4.0 or newer.
+
 ## Kiosk tips
 
 - The app starts automatically after a reboot. On Android 10 and newer, some devices block that; on those, set the player as the default **Home** app, or use the device's own "auto-start app" setting (common on signage boxes).

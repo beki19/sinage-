@@ -12,10 +12,27 @@ export interface Media {
   size: number;
   sha256: string;
   createdAt: string;
+  /** Videos: what's inside, read from the file when it's uploaded. */
+  video?: VideoInfo | null;
+  /** Videos too heavy for TVs get a 1080p H.264 copy that screens download instead. */
+  screenCopy?: { filename: string; size: number; sha256: string; video?: VideoInfo | null } | null;
+  convert?: "running" | "done" | "failed" | "needs-ffmpeg" | null;
+  convertError?: string | null;
+}
+
+export interface VideoInfo {
+  width: number;
+  height: number;
+  /** avc1 (H.264), hvc1/hev1 (H.265), av01, vp09… */
+  codec: string;
+  /** e.g. "H.264 High 4.1" */
+  label: string;
+  /** Plays on practically any TV: H.264 at 1080p or less. */
+  tvSafe: boolean;
 }
 
 /**
- * media:  an uploaded image or video
+ * media: an uploaded image or video
  * text:   a typed message, shown full-zone or scrolling as a ticker
  * web:    a web page or a YouTube link
  * stream: a live video stream (HLS .m3u8 or a plain video URL)
@@ -111,6 +128,8 @@ export interface Device {
   lastCommandResult: { type: CommandType; ok: boolean; message: string; at: string } | null;
   /** When the latest screenshot (data/screenshots/<id>.jpg) arrived. */
   screenshotAt: string | null;
+  /** What the player last said it was doing. */
+  live?: LiveStatus | null;
   /** 10-minute buckets (time / 10 min) in which the screen checked in, last 7 days. */
   seen?: number[];
   /** Last state the alert checker saw, so it alerts once per change. null until first checked. */
@@ -133,6 +152,19 @@ export interface DeviceCommand {
   id: string;
   type: CommandType;
   createdAt: string;
+}
+
+export interface LiveStatus {
+  at: string;
+  /** playing | downloading | waiting | error | pairing… */
+  state: string;
+  message: string | null;
+  program: string | null;
+  zones: { zoneId: string; itemId: string | null; kind: string | null; state: string; error: string | null }[];
+  download: { done: number; total: number; mb: number } | null;
+  screen: string | null;
+  freeMb: number | null;
+  videoMode: string | null;
 }
 
 /** Screens that all show the same thing, e.g. "All lobby TVs". */
